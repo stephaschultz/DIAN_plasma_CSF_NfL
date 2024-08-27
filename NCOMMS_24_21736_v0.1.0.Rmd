@@ -1,0 +1,2659 @@
+---
+title: "NCOMMS-24-21736A"
+author: "Stephanie Schultz"
+date: "8/24/2024"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Load Libraries}
+library(dplyr); library(ggplot2); library(cowplot);library(gtsummary);library(gt);library(lme4); library(AICcmodavg); library(rstan);library(rstanarm);library(Hmisc);library(lmerTest); library(cowplot);library(segmented); library(mgcv)
+```
+
+```{r Load data}
+# NfL data
+data <- read.csv("/Users/sws59/Desktop/DIAN_Mathias_collab/a_old/nfl_merge_for_anna_inkl_outliers_08022021.csv")
+#gender coded: 0 == Female; 1 == Male
+
+```
+
+
+```{r Clean filter and merge data}
+
+# exclude weakly pathogenic + dutch type for flowchart
+data$j_MutationType <- ifelse(data$MUTATIONTYPE == "1", "PSEN1", ifelse(data$MUTATION == "2", "PSEN2", "APP"))
+data$j_MutationType_2 <- paste(data$j_MutationType, data$fam_mutation_chg, sep = "_")
+excluded_genotypes = c("PSEN1_Phe176del", "PSEN1_Phe105Ser", "PSEN1_Lys109*", "PSEN1_Ile439Val", "PSEN1_Intron 4: IVS4+7A>G (het.)", "PSEN2_Arg62His", "PSEN2_Arg71Trp", "PSEN2_Leu238Phe")
+
+#count number of individuals with dutchtypeCAA
+n_dutchtypeCAA <- data %>% subset(dutch_mut == 1) %>% subset(Mutation == "1") %>% dplyr::count(imagid)
+n_dutchtypeCAA_NC <- data %>% subset(dutch_mut == 1) %>% subset(Mutation == "0") %>% dplyr::count(imagid)
+
+#count number of individuals with APP duplication
+APP_duplication = c("APP_duplication exons 1-18", "APP_Duplication of the whole APP gene")
+n_APP_duplication <- data %>% subset(j_MutationType_2 %in% APP_duplication)%>% subset(Mutation == "1") %>% dplyr::count(imagid)
+n_APP_duplication_NC <- data %>% subset(j_MutationType_2 %in% APP_duplication)%>% subset(Mutation == "0") %>% dplyr::count(imagid)
+
+#count number of individuals with weakly pathogenic variants
+n_weaklypathogenic <- data %>% subset(j_MutationType_2 %in% excluded_genotypes)%>% subset(Mutation == "1") %>% dplyr::count(imagid)
+n_weaklypathogenic_NC <- data %>% subset(j_MutationType_2 %in% excluded_genotypes)%>% subset(Mutation == "0") %>% dplyr::count(imagid)
+
+# remove individuals with weakly pathogenic and dutchtypeCAA mutation
+data <- subset(data, !(j_MutationType_2 %in% excluded_genotypes))
+data <- subset(data, dutch_mut == 0)
+
+
+data  <- data %>% filter(Exclusion == 0 ) %>% filter(dian_mutpar_eyo < 15 )%>% filter(bmi > -15 )
+
+#select first visit
+baseline <- aggregate(visit~imagid, data, FUN = "min") 
+data_base <- merge(data, baseline, by = c( "visit", "imagid"))
+rm(baseline)
+
+data_base  <- data_base %>% filter(PLASMA_NFL > -15 | CSF_NFL > -15)# select visits that have either a plasma or CSF NfL value
+
+CSF_all  <- data %>% filter(CSF_NFL > -1 ) # exclude missing CSF NfL
+CSF_all_bmi <- subset(CSF_all, bmi >0 ) #exclude visits missing bmi (10 missing)
+CSF_plasma_all  <- CSF_all_bmi %>% filter(PLASMA_NFL > -1 )# further exclude any instances missing plasma NfL (18 more missing)
+
+# subset into MC status groups
+CSF_NC <- subset(CSF_all, Mutation == 0)
+CSF_MC <- subset(CSF_all, Mutation == 1)
+
+baseline <- aggregate(visit~imagid, CSF_all, FUN = "min")
+CSF_base <- merge(CSF_all, baseline, by = c( "visit", "imagid"))
+rm(baseline)
+
+CSF_base_NC <- subset(CSF_base, Mutation == 0)
+CSF_base_MC <- subset(CSF_base, Mutation == 1)
+CSF_base_bmi <- filter(CSF_base, bmi >0)
+CSF_base_bmi$MR_bl_PRECUNEUS <- (CSF_base_bmi$MR_LV_PRECUNEUS + CSF_base_bmi$MR_RV_PRECUNEUS)/2
+
+CSF_base_bmi_slim <- CSF_base_bmi %>% dplyr::select(Mutation,visitage, gender, dian_mutpar_eyo,bmi, MMSE,cdrglob, j_MutationType_2,j_MutationType, CSF_NFL, MR_bl_PRECUNEUS,PIB_fSUVR_rsf_TOT_CTX_PRECUNEUS)
+
+
+
+
+plasma_all  <- data %>% filter(PLASMA_NFL > -1 ) %>% filter(dian_mutpar_eyo > -100 )
+
+baseline <- aggregate(visit~imagid, plasma_all, FUN = "min")
+plasma_base <- merge(plasma_all, baseline, by = c( "visit", "imagid"))
+rm(baseline)
+
+plasma_base_bmi <- subset(plasma_base, bmi >0 )
+plasma_base_bmi$MR_bl_PRECUNEUS <- (plasma_base_bmi$MR_LV_PRECUNEUS + plasma_base_bmi$MR_RV_PRECUNEUS)/2
+plasma_base_bmi_slim <- plasma_base_bmi %>% dplyr::select(Mutation,visitage, gender, dian_mutpar_eyo,bmi, MMSE,cdrglob, j_MutationType_2,j_MutationType, PLASMA_NFL, MR_bl_PRECUNEUS, PIB_fSUVR_rsf_TOT_CTX_PRECUNEUS)
+
+data_base_slim <- full_join(plasma_base_bmi_slim, CSF_base_bmi_slim)
+
+data_base_slim$CDRGLOB_f_dichot <- ifelse(data_base_slim$cdrglob == 0, "a_CDR0",  "b_CDR0.5+")	
+data_base_slim$CDRGLOB_f2 <- ifelse(data_base_slim$cdrglob == 0, "a_CDR0", (ifelse(data_base_slim$cdrglob == 0.5, "b_CDR0.5", "c_CDR1+" )))	
+
+# log transform NfL
+CSF_plasma_all$log_CSF_NFL <- log10(CSF_plasma_all$CSF_NFL) 
+CSF_plasma_all$log_PLASMA_NFL <- log10(CSF_plasma_all$PLASMA_NFL)
+
+#select first visit
+baseline <- aggregate(visit~imagid, CSF_plasma_all, FUN = "min") 
+CSF_plasma_base <- merge(CSF_plasma_all, baseline, by = c( "visit", "imagid"))
+rm(baseline)
+
+# generate ratio of plasma to csf
+#CSF_plasma_base$logplasma_logCSF_ratio <- CSF_plasma_base$log_PLASMA_NFL/CSF_plasma_base$log_CSF_NFL 
+CSF_plasma_base$plasma_CSF_ratio <- CSF_plasma_base$PLASMA_NFL/CSF_plasma_base$CSF_NFL
+
+CSF_plasma_base_mpos <- subset(CSF_plasma_base, Mutation == "1")
+CSF_plasma_base_mneg <- subset(CSF_plasma_base, Mutation == "0")
+
+
+
+#Binning by CDR and av45
+CSF_plasma_base$CDRGLOB_f_dichot <- ifelse(CSF_plasma_base$cdrglob == 0, "a_CDR0",  "b_CDR0.5+")	
+CSF_plasma_base$CDRGLOB_f2 <- ifelse(CSF_plasma_base$cdrglob == 0, "a_CDR0", (ifelse(CSF_plasma_base$cdrglob == 0.5, "b_CDR0.5", "c_CDR1+" )))
+
+#### longitudinal 
+CSF_plasma_all_long <-CSF_plasma_all %>% group_by(imagid) %>%
+  filter(n() > 1)
+# 
+# number <-CSF_plasma_all_long %>% group_by(imagid) %>% count(imagid)
+# number <-CSF_plasma_all %>% group_by(imagid) %>% count(imagid)
+# 
+# mean(number$n)
+# psych::describe(number$n)
+
+
+earliest_eyo <- aggregate(dian_mutpar_eyo~imagid, CSF_plasma_all_long, FUN = "min")
+colnames(earliest_eyo) <- c("imagid", "earliest_eyo")
+CSF_plasma_all_long <- merge(CSF_plasma_all_long, earliest_eyo, by = "imagid")
+
+latest_eyo <- aggregate(dian_mutpar_eyo~imagid, CSF_plasma_all_long,FUN ="max")
+colnames(latest_eyo) <- c("imagid", "latest_eyo")
+CSF_plasma_all_long <- merge(CSF_plasma_all_long, latest_eyo, by = "imagid")
+
+earliest_age <- aggregate(visitage~imagid, CSF_plasma_all_long,FUN ="min")
+colnames(earliest_age) <- c("imagid", "earliest_age")
+CSF_plasma_all_long <- merge(CSF_plasma_all_long, earliest_age, by = "imagid")
+
+
+earliest_bmi <- aggregate(bmi~imagid, CSF_plasma_all_long,FUN ="min")
+colnames(earliest_bmi) <- c("imagid", "earliest_bmi")
+CSF_plasma_all_long <- merge(CSF_plasma_all_long, earliest_bmi, by = "imagid")
+
+CSF_plasma_all_long$time_wrt_base <- CSF_plasma_all_long$dian_mutpar_eyo - CSF_plasma_all_long$earliest_eyo 
+log_plasma_NfL.conc_pg_ml_slope <-(lmer(log_PLASMA_NFL  ~ 1 + time_wrt_base + (time_wrt_base|imagid), CSF_plasma_all_long))
+beta <- coef(log_plasma_NfL.conc_pg_ml_slope)$imagid
+extracted1 <- tibble::rownames_to_column(beta, "imagid") # Apply rownames_to_column
+extracted1
+
+
+
+log_plasma_long_rate<- merge(extracted1, CSF_plasma_all_long, by = "imagid")
+log_plasma_long_rate$log_plasma_nfL_rate <-log_plasma_long_rate$time_wrt_base.x
+baseline <- aggregate(visit~imagid, log_plasma_long_rate, FUN = "max")
+log_plasma_long_rate_min <- merge(baseline,log_plasma_long_rate, by = c( "visit", "imagid"), all =F)
+rm(baseline)
+
+
+
+log_csf_NfL.conc_pg_ml_slope <-(lmer(log_CSF_NFL  ~ 1 + time_wrt_base + (time_wrt_base|imagid), CSF_plasma_all_long))
+beta <- coef(log_csf_NfL.conc_pg_ml_slope)$imagid
+extracted1 <- tibble::rownames_to_column(beta, "imagid") # Apply rownames_to_column
+extracted1
+log_csf_long_rate<- merge(extracted1, CSF_plasma_all_long, by = "imagid")
+log_csf_long_rate$log_csf_nfL_rate <-log_csf_long_rate$time_wrt_base.x
+baseline <- aggregate(visit~imagid, log_csf_long_rate, FUN = "max")
+log_csf_long_rate_min <- merge(baseline,log_csf_long_rate, by = c( "visit", "imagid"))
+rm(baseline)
+
+log_csf_plasma_long_rate_min <- merge(log_csf_long_rate_min, log_plasma_long_rate_min, by = c( "visit", "imagid"))
+log_csf_plasma_long_rate_min$Mutation.f <- as.factor(log_csf_plasma_long_rate_min$Mutation.x)
+
+log_csf_plasma_long_rate_min_mneg <- log_csf_plasma_long_rate_min %>% filter (Mutation.f == "0")
+log_csf_plasma_long_rate_min_mpos <- log_csf_plasma_long_rate_min %>% filter (Mutation.f == "1")
+
+#mneg <- log_csf_plasma_long_rate_min %>% filter (Mutation.f == "0") %>% count(imagid)
+#mpos <- log_csf_plasma_long_rate_min %>% filter (Mutation.f == "1") %>%count(imagid)
+
+```
+
+
+```{r Table 1 and Table S1}
+
+MR_bl_PRECUNEUS_mut_n <- data_base_slim %>% subset(MR_bl_PRECUNEUS > -100 ) %>%  dplyr::count(Mutation)
+PIB_fSUVR_rsf_TOT_CTX_PRECUNEUS_mut_n <- data_base_slim %>% subset(PIB_fSUVR_rsf_TOT_CTX_PRECUNEUS > -100 ) %>%  dplyr::count(Mutation)
+PLASMA_NFL_mut_n <- data_base_slim %>% subset(PLASMA_NFL > -100 ) %>%  dplyr::count(Mutation)
+CSF_NFL_mut_n <- data_base_slim %>% subset(CSF_NFL > -100 ) %>%  dplyr::count(Mutation)
+
+# descriptive statistics
+table0 <- data_base_slim %>% dplyr::select(visitage, gender, dian_mutpar_eyo,bmi, MMSE,CDRGLOB_f2, j_MutationType,MR_bl_PRECUNEUS, PIB_fSUVR_rsf_TOT_CTX_PRECUNEUS, PLASMA_NFL, CSF_NFL) %>%
+  mutate(CDRGLOB_f2 = factor(data_base_slim$CDRGLOB_f2, labels = c("CDR 0", "CDR 0.5", "CDR 1+"))) %>%
+  mutate(Mutation = factor(data_base_slim$Mutation, labels = c("NC", "MC")))%>%
+  mutate(gender = factor(gender, labels = c("Female", "Male")))
+  
+
+data_base_slim_MC <- data_base_slim %>% filter(Mutation == 1) %>% filter(CDRGLOB_f2 == "c_CDR1+")
+
+table(data_base_slim_MC$j_MutationType)
+library(gt)
+ table1 <-  tbl_summary(table0, by = Mutation,
+                      statistic = all_continuous() ~ "{mean} ({sd})",
+                      digits = all_continuous() ~ 1,
+                      missing = "no" ,
+                      label = list(visitage ~ "Age (yrs)",
+                                   gender = "Sex",
+                                   dian_mutpar_eyo = "EYO (yrs)",
+                                   bmi = "BMI",
+                                   MMSE = "MMSE",
+                                   CDRGLOB_f2 = "CDR Global",
+                                   j_MutationType = "Family Mutation",
+                                   MR_bl_PRECUNEUS = "Precuneus volume (mm3)", 
+                                   PIB_fSUVR_rsf_TOT_CTX_PRECUNEUS = "Precuneus PiB-PET (SUVR)",
+                                   PLASMA_NFL = "Plasma NfL (pg/ml)",
+                                   CSF_NFL = "CSF NfL (pg/ml)")) 
+#add_n() %>% # add column with total number of non-missing observations
+ table1_1 <- table1 %>% add_p( pvalue_fun = function(x) style_pvalue(x, digits = 3)) %>% # test for a difference between groups
+  modify_header(label = "**Variable**") %>% 
+  # update the column header
+  bold_labels()%>%
+   as_gt() %>%
+  gt::tab_source_note(gt::md("MC = ADAD-carrying mutation carrier; NC = Non-carrier family member; EYO = estimated years from symptom onset; MMSE = Mini Mental Status Examination; BMI =Body mass index; CDR = Clinical Dementia Rating. The overall N is 212 for NC group and 355 for MC, except for precuneus volume (NC = 200 and MC = 327), precuneus PiB-PET (NC = 186 and MC = 284), plasma NfL (NC = 193 and MC = 314), and CSF NfL (NC = 164 and MC = 278). Note that not all parameters could be collected from each participant. Sex was self-reported as male or female.")) %>%
+   gtsave("/Users/sws59/Dropbox (Partners HealthCare)//DIAN_Mathias_collab/NfL_paper/NC_submission/Rev_2/Table1.docx")
+ 
+
+#get exact p-values
+p <- as.data.frame(table1_1$table_body$p.value)
+
+# longitduinal background characterstics table s1 #
+log_csf_plasma_long_rate_min$CDRGLOB_f_dichot <- ifelse(log_csf_plasma_long_rate_min$cdrglob.x == 0, "a_CDR0",  "b_CDR0.5+")	
+log_csf_plasma_long_rate_min$CDRGLOB_f2 <- ifelse(log_csf_plasma_long_rate_min$cdrglob.x == 0, "a_CDR0", (ifelse(log_csf_plasma_long_rate_min$cdrglob.x == 0.5, "b_CDR0.5", "c_CDR1+" )))	
+
+log_csf_plasma_long_rate_min$gender <- log_csf_plasma_long_rate_min$gender.x
+
+log_csf_plasma_long_rate_min$MR_BL_PRECUNEUS  <- (log_csf_plasma_long_rate_min$MR_LV_PRECUNEUS.y + log_csf_plasma_long_rate_min$MR_RV_PRECUNEUS.y)/2
+
+MR_bl_PRECUNEUS_mut_n_long <- log_csf_plasma_long_rate_min %>% subset(MR_BL_PRECUNEUS > -100 ) %>%  dplyr::count(Mutation.x)
+PIB_fSUVR_rsf_TOT_CTX_PRECUNEUS_mut_n_long <- log_csf_plasma_long_rate_min %>% subset(PIB_fSUVR_rsf_TOT_CTX_PRECUNEUS.x > -100 ) %>%  dplyr::count(Mutation.x)
+
+PLASMA_NFL_mut_n_long <- log_csf_plasma_long_rate_min %>% subset(PLASMA_NFL.x > -100 ) %>%  dplyr::count(Mutation.x)
+CSF_NFL_mut_n_long <- log_csf_plasma_long_rate_min %>% subset(CSF_NFL.x > -100 ) %>%  dplyr::count(Mutation.x)
+
+# descriptive statistics
+tables0 <- log_csf_plasma_long_rate_min %>% dplyr::select(visitage.y, gender, dian_mutpar_eyo.y,bmi.x, MMSE.x, j_MutationType.x, MR_BL_PRECUNEUS,PIB_fSUVR_rsf_TOT_CTX_PRECUNEUS.x,  PLASMA_NFL.x, CSF_NFL.x, CDRGLOB_f2) %>%
+  mutate(Mutation = factor(log_csf_plasma_long_rate_min$Mutation.x, labels = c("NC", "MC")))%>%
+  mutate(gender = factor(log_csf_plasma_long_rate_min$gender, labels = c("Female", "Male"))) %>%
+  mutate(CDRGLOB_f2 = factor(log_csf_plasma_long_rate_min$CDRGLOB_f2, labels = c("CDR 0", "CDR 0.5", "CDR 1+"))) 
+
+  
+  #mutate(Group_no_12 = factor(log_csf_plasma_long_rate_min$Group_no_12.x, labels=c('PreSymptomatic', 'PreSymptomatic', 'Converters', 'Symptomatic')))
+library(gtsummary)
+ tables1 <- tbl_summary(tables0, by = Mutation,
+                      statistic = all_continuous() ~ "{mean} ({sd})",
+                      digits = all_continuous() ~ 1,
+                      missing = "no" ,
+                      label = list(visitage.y ~ "Baseline age (yrs)",
+                                   gender = "Sex",
+                                   dian_mutpar_eyo.y = "EYO (yrs)",
+                                   bmi.x = "Baseline BMI",
+                                   MMSE.x = "Baseline MMSE",
+                                   CDRGLOB_f2 = "Baseline CDR Global",
+                                   j_MutationType.x = "Family Mutation",
+                                   MR_BL_PRECUNEUS = "Baseline precuneus volume (mm3)",
+                                   PIB_fSUVR_rsf_TOT_CTX_PRECUNEUS.x = "Baseline precuneus PiB-PET (SUVR)",
+                                   PLASMA_NFL.x = "Baseline plasma NfL (pg/ml)",
+                                   CSF_NFL.x = "Baseline CSF NfL (pg/ml)"))
+tables1_1 <- tables1 %>% add_p( pvalue_fun = function(x) style_pvalue(x, digits = 3)) %>% # test for a difference between groups
+  modify_header(label = "**Variable**") %>% 
+  # update the column header
+  bold_labels() %>% 
+   as_gt() %>%
+  gt::tab_source_note(gt::md("MC = ADAD-carrying mutation carrier; NC = Non-carrier family member; EYO = estimated years from symptom onset; MMSE = Mini Mental Status Examination; BMI =Body mass index; CDR = Clinical Dementia Rating. The overall N is 88 for NC group and 146 for MC, except for precuneus volume (NC = 78 and MC = 127) and precuneus PiB-PET (NC = 61 and MC = 94). Note that not all parameters could be collected from each participant.Sex was self-reported as male or female.")) %>% gtsave("/Users/sws59/Dropbox (Partners HealthCare)/DIAN_Mathias_collab/NfL_paper/NC_submission/Rev_2/TableS1.docx")
+ 
+#get exact p-values
+tables1_1 <- tables1 %>% add_p( pvalue_fun = function(x) style_pvalue(x, digits = 3)) 
+p <- as.data.frame(tables1_1$table_body$p.value)
+
+
+```
+
+
+```{r figure 1a-b AIC table s2 and s3}
+
+# figure 1a #
+
+Formatting_Scatter = 
+  theme_bw() +
+  theme(axis.text = element_text(size = 25)) +
+  theme(legend.title=element_blank()) +
+  theme(legend.text=element_text(size=25, family="Helvetica", face="bold")) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size = 35, face="bold")) + 
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size = 35, face="bold")) +
+  theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent")) 
+
+CSF_plasma_base$Mutation.f <- as.factor(CSF_plasma_base$Mutation)
+
+Point = geom_point(size=4,show.legend=T, alpha = .5) 
+cPlot=ggplot(CSF_plasma_base, aes(x=log_CSF_NFL, y=log_PLASMA_NFL, group=Mutation.f, color=Mutation.f, fill=Mutation.f))
+Color=scale_color_manual(values=c( "grey33","#A50026"), labels=c('NC', 'MC')) 
+Fill=scale_fill_manual(values=c( "grey33","#A50026"), labels=c('NC', 'MC')) 
+text = annotate("text", size = 8, x=2.3, y=1.78, fontface=2,label= "NC: r = 0.553, p = 2.3e-14",color = "grey33")
+text2 = annotate("text", size = 8, x=2.29, y=1.9, fontface=2,label= "MC: r = 0.845, p <2.2e-16",color = "#A50026")
+Shape_Labels= scale_shape_discrete(labels=c('NC', 'MC'),solid=TRUE) 
+line= geom_smooth(method =  "lm", size=3, se=TRUE) 
+ legend_pos = theme(legend.position = c(0.15,.80))
+Labels =labs( x = bquote(bold(log[10](CSF~NfL))), y =bquote(bold(log[10](Plasma~NfL))), fontface=2 )
+all_log_csf_plasma=cPlot +  Point +Labels+Fill +Color+ text + text2 + Shape_Labels+Formatting_Scatter+line +legend_pos
+print(all_log_csf_plasma)
+
+
+table(CSF_plasma_base_mpos$gender)
+table(CSF_plasma_base_mneg$gender)
+
+
+# rsquared without covariates in mpos
+cor.test(CSF_plasma_base_mpos$log_CSF_NFL, CSF_plasma_base_mpos$log_PLASMA_NFL)
+m_base_mpos <- summary(lm(log_PLASMA_NFL ~ log_CSF_NFL, CSF_plasma_base_mpos)) #Adjusted R-squared:  0.7124 
+m_base_mpos$coefficients #8.440874e-76
+m_base_mpos$adj.r.squared #0.7124442
+
+
+# rsquared without covariates in mneg
+cor.test(CSF_plasma_base_mneg$log_CSF_NFL, CSF_plasma_base_mneg$log_PLASMA_NFL)
+summary(lm(log_PLASMA_NFL ~ log_CSF_NFL, CSF_plasma_base_mneg)) #Adjusted R-squared:  0.3015 
+
+# figure 1b #
+Formatting_Scatter = 
+  theme_bw() +
+  theme(axis.text = element_text(size = 25)) +
+  theme(legend.title=element_blank()) +
+  theme(legend.text=element_text(size=15, family="Helvetica")) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size = 35, face="bold")) + 
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size = 35, face="bold")) +
+  theme(legend.position = "" )+
+  theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent")) 
+
+log_csf_plasma_long_rate_min$Mutation.f <- as.factor(log_csf_plasma_long_rate_min$Mutation.x)
+
+Point = geom_point(size=3,show.legend=F, alpha =.5 ) 
+cPlot=ggplot(log_csf_plasma_long_rate_min, aes(x=log_csf_nfL_rate, y=log_plasma_nfL_rate, group=Mutation.f, color=Mutation.f, fill=Mutation.f))
+line= geom_smooth(method =  "lm", size=3, se=TRUE) 
+Color=scale_color_manual(values=c( "grey33","#A50026"), labels=c('NC', 'MC')) 
+Fill=scale_fill_manual(values=c( "grey33","#A50026"), labels=c('NC', 'MC')) 
+text = annotate("text", size = 8, x=.021, y=0.051, fontface=2,label= "NC: r = 0.50, p = 5.64e-07",color = "grey33")
+text2 = annotate("text", size = 8, x=.019, y=0.055, fontface=2,label= "MC: r = 0.76, p < 2e-16",color = "#A50026")
+Shape_Labels= scale_shape_discrete(labels=c('NC', 'MC'),solid=TRUE) 
+Labels=labs(x = bquote(bold(paste( Delta, ~log[10](CSF~NfL)))), y = bquote(bold(paste( Delta, ~log[10](Plasma~NfL))))) 
+rate_all_log_csf_plasma=cPlot + line+ Point + Labels+Fill +Color+ text + text2+Shape_Labels+Formatting_Scatter
+print(rate_all_log_csf_plasma)
+ 
+Figure_1 <- plot_grid(all_log_csf_plasma, rate_all_log_csf_plasma ,nrow = 1, hjust=0, labels = "AUTO", label_size = 35)
+
+
+
+# 
+# mneg <- log_csf_plasma_long_rate_min %>% filter (Mutation.f == "0") %>%count(imagid)
+# mpos <- log_csf_plasma_long_rate_min %>% filter (Mutation.f == "1") %>%count(imagid)
+
+log_csf_plasma_long_rate_min_mneg <- log_csf_plasma_long_rate_min %>% filter (Mutation.f == "0")
+log_csf_plasma_long_rate_min_mpos <- log_csf_plasma_long_rate_min %>% filter (Mutation.f == "1") 
+
+
+cor.test(log_csf_plasma_long_rate_min_mpos$log_csf_nfL_rate, log_csf_plasma_long_rate_min_mpos$log_plasma_nfL_rate) # r = 0.7583762
+
+cor.test(log_csf_plasma_long_rate_min_mneg$log_csf_nfL_rate, log_csf_plasma_long_rate_min_mneg$log_plasma_nfL_rate) # r = 0.5037312
+
+
+m_rate_mpos <- summary(lm (log_plasma_nfL_rate~  log_csf_nfL_rate , log_csf_plasma_long_rate_min_mpos))
+m_rate_mpos$coefficients #1.492994e-28
+m_rate_mpos$adj.r.squared # 0.572184
+
+
+m_rate_mneg <- summary(lm (log_plasma_nfL_rate~  log_csf_nfL_rate , log_csf_plasma_long_rate_min_mneg))
+m_rate_mneg$adj.r.squared #0.2450677
+m_rate_mneg$coefficients #5.647965e-07
+
+# Table S2 #
+
+## with gender, bmi, age in mpos for csf
+m_base_mpos_cov_csf <- summary(lm(log_CSF_NFL ~ visitage + bmi + gender, CSF_plasma_base_mpos))
+m_base_mpos_cov_csf$coefficients
+#                 Estimate  Std. Error    t value     Pr(>|t|)
+# (Intercept)  1.741990874 0.098655817 17.6572545 6.482596e-47
+# visitage     0.021442295 0.001564432 13.7061233 8.175495e-33
+# bmi         -0.001626305 0.002951325 -0.5510422 5.820604e-01
+# gender       0.088208980 0.032980119  2.6746107 7.938108e-03
+
+## with gender, bmi, age in mpos for plasma
+m_base_mpos_cov_plasma <- summary(lm(log_PLASMA_NFL ~ visitage + bmi + gender, CSF_plasma_base_mpos))
+m_base_mpos_cov_plasma$coefficients
+#                 Estimate  Std. Error    t value     Pr(>|t|)
+# (Intercept)  0.489026907 0.076019007  6.4329557 5.669500e-10
+# visitage     0.016194257 0.001205469 13.4339866 7.431618e-32
+# bmi         -0.008057301 0.002274136 -3.5430158 4.659374e-04
+# gender      -0.023076626 0.025412753 -0.9080726 3.646496e-01
+
+## with gender, bmi, age in mneg for csf
+m_base_mneg_cov_csf <-summary(lm(log_CSF_NFL ~ visitage + bmi + gender, CSF_plasma_base_mneg))
+m_base_mneg_cov_csf$coefficients
+#                 Estimate  Std. Error   t value     Pr(>|t|)
+# (Intercept)  1.740898197 0.070977376 24.527509 9.541372e-56
+# visitage     0.017060583 0.001310039 13.022955 8.402525e-27
+# bmi         -0.002908791 0.002503552 -1.161866 2.470422e-01
+# gender       0.085202002 0.028004747  3.042413 2.748996e-03
+
+## with gender, bmi, age in mneg for plasma
+m_base_mneg_cov_plasma <- summary(lm(log_PLASMA_NFL ~ visitage + bmi + gender, CSF_plasma_base_mneg))
+m_base_mneg_cov_plasma$coefficients
+#                 Estimate  Std. Error    t value     Pr(>|t|)
+# (Intercept)  0.555353636 0.067981113  8.1692343 9.355866e-14
+# visitage     0.011577654 0.001254737  9.2271572 1.722174e-16
+# bmi         -0.009779955 0.002397867 -4.0786066 7.165051e-05
+# gender      -0.013849980 0.026822546 -0.5163559 6.063278e-01
+
+# AIC #
+csf_only <- lm(log_PLASMA_NFL ~ log_CSF_NFL, CSF_plasma_base_mpos)
+csf_age <- lm(log_PLASMA_NFL ~ visitage + log_CSF_NFL, CSF_plasma_base_mpos)
+csf_bmi <- lm(log_PLASMA_NFL ~ bmi + log_CSF_NFL, CSF_plasma_base_mpos)
+csf_gender <- lm(log_PLASMA_NFL ~ gender + log_CSF_NFL, CSF_plasma_base_mpos)
+csf_age_bmi <- lm(log_PLASMA_NFL ~ visitage + bmi+ log_CSF_NFL, CSF_plasma_base_mpos)
+csf_age_gender <- lm(log_PLASMA_NFL ~ visitage + gender+ log_CSF_NFL, CSF_plasma_base_mpos)
+csf_bmi_gender <- lm(log_PLASMA_NFL ~ bmi + gender+ log_CSF_NFL, CSF_plasma_base_mpos)
+csf_bmi_gender_age <- lm(log_PLASMA_NFL ~ bmi + gender+ visitage+log_CSF_NFL, CSF_plasma_base_mpos)
+
+
+
+models <- list(csf_only,csf_age, csf_bmi, csf_gender, csf_age_gender, csf_age_bmi, csf_bmi_gender,csf_bmi_gender_age)
+
+model.names <- c('csf_only','csf_age','csf_bmi', 'csf_gender', 'csf_age_gender', 'csf_age_bmi', 'csf_bmi_gender', 'csf_bmi_gender_age')
+aictab(cand.set = models, modnames = model.names)
+# 
+# Model selection based on AICc:
+# 
+#                    K    AICc Delta_AICc AICcWt Cum.Wt     LL
+# csf_bmi_gender_age 6 -322.49       0.00   0.99   0.99 167.40
+# csf_bmi_gender     5 -312.87       9.62   0.01   1.00 161.55
+# csf_age_bmi        5 -303.62      18.87   0.00   1.00 156.92
+# csf_age_gender     5 -301.12      21.37   0.00   1.00 155.67
+# csf_gender         4 -294.48      28.01   0.00   1.00 151.31
+# csf_bmi            4 -293.78      28.71   0.00   1.00 150.97
+# csf_age            4 -283.97      38.52   0.00   1.00 146.06
+# csf_only           3 -277.01      45.48   0.00   1.00 141.55
+
+csf_only <- lm(log_plasma_nfL_rate ~ log_csf_nfL_rate, log_csf_plasma_long_rate_min_mpos)
+csf_age <- lm(log_plasma_nfL_rate ~ visitage.y + log_csf_nfL_rate, log_csf_plasma_long_rate_min_mpos)
+csf_bmi <- lm(log_plasma_nfL_rate ~ bmi.x + log_csf_nfL_rate, log_csf_plasma_long_rate_min_mpos)
+csf_gender <- lm(log_plasma_nfL_rate ~ gender.x + log_csf_nfL_rate, log_csf_plasma_long_rate_min_mpos)
+csf_age_bmi <- lm(log_plasma_nfL_rate ~ visitage.y + bmi.x+ log_csf_nfL_rate, log_csf_plasma_long_rate_min_mpos)
+csf_age_gender <- lm(log_plasma_nfL_rate ~ visitage.y + gender.x+ log_csf_nfL_rate, log_csf_plasma_long_rate_min_mpos)
+csf_bmi_gender <- lm(log_plasma_nfL_rate ~ bmi.x + gender.x+ log_csf_nfL_rate, log_csf_plasma_long_rate_min_mpos)
+csf_bmi_gender_age <- lm(log_plasma_nfL_rate ~ bmi.x + gender.x+ visitage.y+log_csf_nfL_rate, log_csf_plasma_long_rate_min_mpos)
+
+models <- list(csf_only,csf_age, csf_bmi, csf_gender, csf_age_gender, csf_age_bmi, csf_bmi_gender,csf_bmi_gender_age)
+
+model.names <- c('csf_only','csf_age','csf_bmi', 'csf_gender', 'csf_age_gender', 'csf_age_bmi', 'csf_bmi_gender', 'csf_bmi_gender_age')
+aictab(cand.set = models, modnames = model.names)
+# 
+# Model selection based on AICc:
+# 
+#                    K     AICc Delta_AICc AICcWt Cum.Wt     LL
+# csf_bmi_gender_age 6 -1041.27       0.00   0.93   0.93 526.94
+# csf_bmi_gender     5 -1035.80       5.47   0.06   0.99 523.11
+# csf_age_bmi        5 -1030.16      11.11   0.00   1.00 520.29
+# csf_age_gender     5 -1027.19      14.08   0.00   1.00 518.81
+# csf_bmi            4 -1026.93      14.34   0.00   1.00 517.61
+# csf_gender         4 -1022.85      18.42   0.00   1.00 515.57
+# csf_age            4 -1016.02      25.25   0.00   1.00 512.15
+# csf_only           3 -1013.72      27.55   0.00   1.00 509.94
+
+
+# Table S3 #
+
+m_base_mpos_cov <- summary(lm(log_PLASMA_NFL ~ visitage + bmi + gender+ log_CSF_NFL, CSF_plasma_base_mpos)) #Adjusted R-squared:  0.7592 
+m_base_mpos_cov$adj.r.squared #0.6538251
+m_base_mpos_cov$coefficients
+
+#                 Estimate   Std. Error   t value     Pr(>|t|)
+# (Intercept) -0.548940047 0.0708853464 -7.744055 1.965376e-13
+# visitage     0.003417845 0.0009971875  3.427485 7.045938e-04
+# bmi         -0.007088266 0.0014454325 -4.903906 1.627666e-06
+# gender      -0.075636033 0.0163556317 -4.624464 5.839377e-06
+# log_CSF_NFL  0.595850971 0.0297889285 20.002430 3.720761e-55
+
+m_rate_mpos_cov <- summary(lm (log_plasma_nfL_rate~ visitage.x+ bmi.x +gender.x+  log_csf_nfL_rate , log_csf_plasma_long_rate_min_mpos))
+m_rate_mpos_cov$adj.r.squared #0.6538251
+m_rate_mpos_cov$coefficients
+
+#                       Estimate   Std. Error   t value     Pr(>|t|)
+# (Intercept)       0.0076646069 3.319491e-03  2.308970 2.239856e-02
+# visitage.x        0.0001700224 6.174901e-05  2.753443 6.674199e-03
+# bmi.x            -0.0003721410 9.131814e-05 -4.075214 7.641934e-05
+# gender.x         -0.0041051572 1.119869e-03 -3.665746 3.484281e-04
+# log_csf_nfL_rate  0.6737441306 5.479877e-02 12.294877 4.572195e-24
+
+
+
+m_rate_mneg_cov <-summary(lm (log_plasma_nfL_rate~ visitage.x+ bmi.x+gender.x+  log_csf_nfL_rate , log_csf_plasma_long_rate_min_mneg))
+m_rate_mneg_cov$adj.r.squared #0.3884484
+m_rate_mneg_cov$coefficients 
+#                       Estimate   Std. Error   t value     Pr(>|t|)
+# (Intercept)       0.0118082774 3.132514e-03  3.769585 3.051025e-04
+# visitage.x        0.0001453669 6.789902e-05  2.140927 3.521318e-02
+# bmi.x            -0.0004102796 9.821038e-05 -4.177558 7.243905e-05
+# gender.x         -0.0020555417 1.201743e-03 -1.710466 9.091522e-02
+# log_csf_nfL_rate  0.3749820661 9.136914e-02  4.104034 9.445920e-05
+
+```
+
+
+
+
+```{r Figure 2b}
+CSF_base_bmi$bmi_meancenter <- CSF_base_bmi$bmi-mean(CSF_base_bmi$bmi)
+CSF_base_bmi$age_meancenter <- CSF_base_bmi$visitage-mean(CSF_base_bmi$visitage)
+
+
+splinefit=rcspline.eval(CSF_base_bmi$dian_mutpar_eyo, nk=3, norm=2, pc=FALSE, inclx=TRUE) #generate the cubic spline fit
+
+#This takes the entire range of EYO and then generates a linear (same as base age) and then cubic terms. We are using 3 knots, but this could be changed
+colnames (splinefit) <- c("eyo_linear", "eyo_cubic") #add labels to the two columns
+CSF_base_bmi = cbind(CSF_base_bmi, splinefit) # Add the spline fits back to the main data
+CSF_base_bmi$log_CSF_NFL <- log10(CSF_base_bmi$CSF_NFL)
+
+
+rstan_log_csf_nfl_bmi_age_adj <- stan_glmer(log_CSF_NFL ~ age_meancenter+ bmi_meancenter+gender +dian_mutpar_eyo*Mutation  + Mutation*eyo_cubic + (1|master_famid), 
+                                        data = CSF_base_bmi, family = gaussian(), 
+                                        algorithm = "sampling", adapt_delta = 0.99,
+                                        prior = cauchy(), prior_intercept = cauchy(),
+                                        chains = 8, cores = 1,  iter = 10000, thin = 10)
+summary(rstan_log_csf_nfl_bmi_age_adj)
+
+parameter_estimates_log <- rstan::extract(rstan_log_csf_nfl_bmi_age_adj$stanfit) 
+factorweights <-cbind(parameter_estimates_log$alpha, parameter_estimates_log$beta) 
+age.1=seq(-25,max(CSF_base_bmi$dian_mutpar_eyo),by=.1) 
+noncarriers_log=matrix(0,nrow = nrow(factorweights), ncol = length(age.1));
+carriers_log=matrix(0,nrow = nrow(factorweights), ncol = length(age.1)) 
+diff_log=matrix(0,nrow = nrow(factorweights), ncol = length(age.1)) 
+contrasts_non_carriers=matrix(0,nrow = length(age.1), ncol = 9);   contrasts_carriers=matrix(0,nrow = length(age.1), ncol = 9) 
+age.1_mat<- as.matrix(age.1)
+for (j in 1:length(age.1)) 
+{tempfit=rcspline.eval(age.1[j],attr(splinefit,'knots'),norm=2, pc=FALSE, inclx=TRUE) 
+contrasts = matrix(c(1,1,
+                     1,1,
+                     1,1,
+                     1,1,
+                     tempfit[1,1],tempfit[1,1],
+                     0,1, 
+                     tempfit[1,2], tempfit[1,2],
+                     0,tempfit[1,1],
+                     0, tempfit[1,2]),
+                   nrow=2, 
+                   ncol=9)
+contrasts_non_carriers[j,]=contrasts[1,]; contrasts_carriers[j,]=contrasts[2,] 
+}
+for (i in 1:nrow(factorweights)) {weights = factorweights[i,] 
+
+for (j in 1:length(age.1)) 
+{
+  contrasts=rbind(contrasts_non_carriers[j,], contrasts_carriers[j,]) 
+  weights_log = contrasts %*% weights 
+  noncarriers_log[i,j]=weights_log[1,]; carriers_log[i,j]=weights_log[2,] 
+  diff_log[i,j]=weights_log[2,]-weights_log[1,] 
+}
+} 
+
+noncarrier_lines=matrix(0, ncol=3, nrow=length(age.1)); carrier_lines=matrix(0, ncol=3, nrow=length(age.1)); diff_lines=matrix(0, ncol=3, nrow=length(age.1)); 
+for (i in 1:ncol(noncarriers_log)) 
+{ temp_non=quantile(noncarriers_log[,i], probs = c(0.05, .5, .95)); temp_non=unname(temp_non) 
+temp_car=quantile(carriers_log[,i], probs = c(0.05, .5, .95)); temp_car=unname(temp_car) 
+temp_diff=quantile(diff_log[,i], probs = c(0.05, .5, .95)); temp_diff=unname(temp_diff) 
+noncarrier_lines[i,1]=temp_non[1];  noncarrier_lines[i,2]=temp_non[2];  noncarrier_lines[i,3]=temp_non[3] 
+carrier_lines[i,1]=temp_car[1];  carrier_lines[i,2]=temp_car[2];  carrier_lines[i,3]=temp_car[3] 
+diff_lines[i,1]=temp_diff[1]; diff_lines[i,2]=temp_diff[2]; diff_lines[i,3]=temp_diff[3]; 
+}
+flipped_age=t(age.1); flipped_age=t(flipped_age); combined_lines=cbind(flipped_age,noncarrier_lines, carrier_lines); 
+colnames(combined_lines)<- c("age","lower_non", "median_non", "upper_non", "lower_car", "median_car", "upper_car") 
+diff_lines=cbind(flipped_age,diff_lines); colnames(diff_lines)<- c("age","lower", "median", "upper") 
+combined_lines=as.data.frame(combined_lines) 
+CSF_base_bmi_eyo <- subset(CSF_base_bmi, dian_mutpar_eyo > -25)
+CSF_base_bmi_eyo$Mutation.f <- as.factor(CSF_base_bmi_eyo$Mutation)
+CSF_base_bmi_NEW <- CSF_base_bmi_eyo %>% dplyr::select(Mutation.f,dian_mutpar_eyo, log_CSF_NFL)
+
+Plot=ggplot(CSF_base_bmi_NEW, aes(x=dian_mutpar_eyo, y=log_CSF_NFL)) 
+Point = geom_point(size=3,aes(color=Mutation.f,shape=Mutation.f), show.legend=F) 
+Color=scale_color_manual(values=c( "#A50026","grey33","#A50026",  "grey33",  "grey33", "grey33",  "#A50026","#A50026"), labels=c('NC', 'MC')) 
+Shape_Labels= scale_shape_discrete(labels=c('NC', 'MC'),solid=TRUE) 
+Ribbon1=geom_ribbon(data = combined_lines, inherit.aes = FALSE, aes(x = age, ymin = lower_car, ymax = upper_car), fill = "#A50026", alpha = 0.4, show.legend=F) 
+Ribbon2=geom_ribbon(data = combined_lines, inherit.aes = FALSE, aes(x = age, ymin = lower_non, ymax = upper_non), fill = "grey33", alpha = 0.4)
+Line_Car = geom_line(data=combined_lines, size=2, aes(x=age, y=median_car, colour = "#A50026"),show.legend=F) 
+Line_Non = geom_line(data=combined_lines, size=2, aes(x=age, y=median_non, colour = "grey33" ),show.legend=F) 
+Labels=labs(x = "Estimated years to symptom onset", y = bquote(bold(log[10](CSF~NfL)))) 
+cx= scale_x_continuous(breaks = c( -30,-20,-10, 0, 10), labels = c( "-30", "-20", "-10", "0", "10"))
+
+Formatting_Scatter = 
+  theme_bw() +
+  theme(axis.text = element_text(size = 20), axis.title.x=element_blank()) +
+  theme(legend.title=element_blank()) +
+  theme(legend.text=element_text(size=15, family="Helvetica")) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size = 20, face="bold")) + 
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size = 20, face="bold")) +
+  theme(legend.position = "" )+
+  theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent")) 
+
+rstan_log_CSF_base_age_bmi_adj=Plot  +Color + Shape_Labels + Line_Car +Line_Non +Ribbon1 +Ribbon2 +Labels +Formatting_Scatter  +cx
+print(rstan_log_CSF_base_age_bmi_adj)
+
+#points
+vline= geom_vline (xintercept= -24.6, linetype="dashed", size = 1)
+Point = geom_point(size=3,aes(color=Mutation.f,shape=Mutation.f), show.legend=F) 
+rstan_log_CSF_base_age_bmi_adj_points=Plot + Point +Color + Shape_Labels + Line_Car +Line_Non +Ribbon1 +Ribbon2 +Labels + vline +Formatting_Scatter  +cx
+print(rstan_log_CSF_base_age_bmi_adj_points)
+
+
+Formatting_Scatter = 
+  # theme(axis.title = element_text(family = "Helvetica", color="#666666", face="bold", size=30)) + 
+  theme_bw() +
+  theme(axis.text = element_text(size = 25), axis.title.x=element_blank()) +
+  theme(legend.title=element_blank()) +
+  theme(legend.text=element_text(size=15, family="Helvetica")) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size = 35, face="bold")) + 
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size = 35, face="bold")) +
+  theme(legend.position = "" )+
+  theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent")) 
+
+
+# Difference Plot #
+Diff_Plot=ggplot(data=as.data.frame(diff_lines), aes(x=dian_mutpar_eyo, y=median))
+Ribbon3=geom_ribbon(data = as.data.frame(diff_lines), inherit.aes = FALSE, aes(x = age, ymin = lower, ymax = upper), fill = "grey80", alpha = 0.6) 
+Line_Diff = geom_line(data=as.data.frame(diff_lines), size=2, aes(x=age, y=median),show.legend=F) 
+  vline= geom_vline (xintercept= -24.6, linetype="dashed", size = 1)
+zero_line=geom_hline(yintercept=0, linetype="dashed", color = "red")
+cx= scale_x_continuous(breaks = c(-30, -20, -10, 0, 10), labels = c("-30", "-20", "-10", "0", "10"))
+Labels=labs(x = "Estimated years to symptom onset", y= bquote(bold("MC v NC log"[10](CSF~NfL)))) 
+rstan_lmer_diff_base_CSF_log_nfl=Diff_Plot + Labels +cx+ Ribbon3 + zero_line + Labels  + Formatting_Scatter +Line_Diff + vline
+print(rstan_lmer_diff_base_CSF_log_nfl)
+
+```
+
+
+```{r Figure 2a}
+plasma_base$log_plasma_nfl <- log10(plasma_base$PLASMA_NFL)
+plasma_base_bmi <- filter(plasma_base, bmi >0)
+plasma_base_bmi_mpos <- filter(plasma_base_bmi, Mutation == 1)
+plasma_base_bmi$bmi_meancenter <- plasma_base_bmi$bmi-mean(plasma_base_bmi$bmi)
+plasma_base_bmi$age_meancenter <- plasma_base_bmi$visitage-mean(plasma_base_bmi$visitage)
+plasma_base_bmi$Mutation.f <- as.factor(plasma_base_bmi$Mutation)
+splinefit=rcspline.eval(plasma_base_bmi$dian_mutpar_eyo, nk=3, norm=2, pc=FALSE, inclx=TRUE) #generate the cubic spline fit
+
+#This takes the entire range of EYO and then generates a linear (same as base age) and then cubic terms. We are using 3 knots, but this could be changed
+colnames (splinefit) <- c("eyo_linear", "eyo_cubic") #add labels to the two columns
+plasma_base_bmi = cbind(plasma_base_bmi, splinefit) # Add the spline fits back to the main data
+
+
+rstan_log_plasma_base<- stan_glmer(log_plasma_nfl ~ gender+ bmi_meancenter+age_meancenter+dian_mutpar_eyo*Mutation.f  + Mutation.f*eyo_cubic + (1|master_famid), 
+                                      data = plasma_base_bmi, family = gaussian(), 
+                                      algorithm = "sampling", adapt_delta = 0.99,
+                                      prior = cauchy(), prior_intercept = cauchy(),
+                                      chains = 8, cores = 1,  iter = 10000, thin = 10)
+
+
+
+# chains is how many instances are being run in parallel, iterations means how many iterations are done within each chain.
+# Thin indicates how many of the interations to retain. In this case I have it set to 1/10. This was their recommended default.
+summary(rstan_log_plasma_base)
+
+
+parameter_estimates_log <- rstan::extract(rstan_log_plasma_base$stanfit) # Extract the model estimates from STAN
+factorweights <-cbind(parameter_estimates_log$alpha, parameter_estimates_log$beta) # This specifically pulls out the intercept (alpha) and beta (beta) parameters
+
+age.1=seq(-25,max(plasma_base$dian_mutpar_eyo),by=.1) #create a vector that ranges from 8 (min age) to 75 (max age) in 0.1 increments
+
+#Each row in the factorweights object represents the model fits for one iteration. 
+# The program also uses the first half of the interations as "warmup" and doesn't save those parameters
+# if you have 8 chains, 2000 iterations, and thin 10 you will end up with 800 final model parameter estimates. We typically run 10,000 iterations
+
+#Generate blankoutput matrices to fill in model fits for each grouop
+noncarriers_log=matrix(0,nrow = nrow(factorweights), ncol = length(age.1)); #generate blank matrices for outputs for noncarriers
+carriers_log=matrix(0,nrow = nrow(factorweights), ncol = length(age.1)) #generate blank matrices for outputs for carriers
+
+diff_log=matrix(0,nrow = nrow(factorweights), ncol = length(age.1)) #generate blank matrices for output of differences
+
+contrasts_non_carriers=matrix(0,nrow = length(age.1), ncol = 9);   contrasts_carriers=matrix(0,nrow = length(age.1), ncol = 9) #Making a blank matrix for contrasts. ncol=6 as there are six model parameters as coded
+
+age.1_mat<- as.matrix(age.1)
+
+for (j in 1:length(age.1)) 
+{tempfit=rcspline.eval(age.1[j],attr(splinefit,'knots'),norm=2, pc=FALSE, inclx=TRUE) 
+contrasts = matrix(c(1,1,
+                     1,1,
+                     1,1,
+                     1,1,
+                     tempfit[1,1],tempfit[1,1],
+                     0,1, 
+                     tempfit[1,2], tempfit[1,2],
+                     0,tempfit[1,1],
+                     0, tempfit[1,2]),
+                   nrow=2, 
+                   ncol=9)
+contrasts_non_carriers[j,]=contrasts[1,]; contrasts_carriers[j,]=contrasts[2,] 
+}
+
+# The contrast values will be arrange like this
+# Every row in the contrasts corresponds to a value in the age range running from the min to max value specified at the very start
+# The values in the columns represent the value that will be multiplied by the values in the factor weight files
+# column 1 = intercept, column 2 = linear effect, column 3 = cubic term, column 4= main carrier effect, column 5=muation*linear term, and column 6 = mutation*cubic
+# for the non-carrier contrast columns 4-6 are 0
+
+#You now have the model parameters and dummy matrices to write out the outputs. Next begin the loop to go through every single interation of Stan 
+# This is a nested loop. For each model iteration, we will see what every point in our age vector (min to max) would be for carriers and non-carriers
+
+for (i in 1:nrow(factorweights)) {weights = factorweights[i,] 
+
+for (j in 1:length(age.1)) 
+{
+  contrasts=rbind(contrasts_non_carriers[j,], contrasts_carriers[j,]) 
+  
+  weights_log = contrasts %*% weights #Multiple beta weights by the contrast to get one value per group for this age and this iteration
+  noncarriers_log[i,j]=weights_log[1,]; carriers_log[i,j]=weights_log[2,] #Write the points out into a matrix for each group
+  diff_log[i,j]=weights_log[2,]-weights_log[1,] #difference is equal to carriers - noncarriers. This is  used to determine the actual ge of deviation 
+}
+} 
+
+
+# At this point you have one matrix that ix a x (n=number of iterations) by y (n=number of age points) for non,carriers, carriers, and the difference
+# So for age = to say 8 you have a distribution of points that the models would provide for that value (1 per iteration) for both non-carriers, carriers, and the difference
+# The next step is to find the medial point in that distribution as well as the 95 or 99% credible intervals (below specifies 99)
+
+## Extract median and 0.05 and 99.5 values
+noncarrier_lines=matrix(0, ncol=3, nrow=length(age.1)); carrier_lines=matrix(0, ncol=3, nrow=length(age.1)); diff_lines=matrix(0, ncol=3, nrow=length(age.1)); #generate blank matrices we will use for lines
+
+for (i in 1:ncol(noncarriers_log)) # For every age point (i)
+{ temp_non=quantile(noncarriers_log[,i], probs = c(0.05, .5, .95)); temp_non=unname(temp_non) #get the 0.05, median, and 99.5 percentile values for each age
+temp_car=quantile(carriers_log[,i], probs = c(0.05, .5, .95)); temp_car=unname(temp_car) #get the 0.05, median, and 99.5 percentile values for each age
+temp_diff=quantile(diff_log[,i], probs = c(0.05, .5, .95)); temp_diff=unname(temp_diff) #get the 0.05, median, and 99.5 percentile values for each age
+
+noncarrier_lines[i,1]=temp_non[1];  noncarrier_lines[i,2]=temp_non[2];  noncarrier_lines[i,3]=temp_non[3] #Write out the 99% Credible intervals and median for each EYO (i) 
+carrier_lines[i,1]=temp_car[1];  carrier_lines[i,2]=temp_car[2];  carrier_lines[i,3]=temp_car[3] # Carriers
+diff_lines[i,1]=temp_diff[1]; diff_lines[i,2]=temp_diff[2]; diff_lines[i,3]=temp_diff[3]; # Difference line. Where the 0.05% (lower) value is >0 the groups are different
+}
+
+# The "lines" files now have three colums. Each column is a line that represents the 0.05, median (.5), and 99.5 values from the distribution
+# Note that we are actually looking at the upper, median, and lower bounds of the difference distribution rather comparing where boundaries for the noncarriers and carriers touch 
+
+# Add age term and column names to matrices for plotting
+flipped_age=t(age.1); flipped_age=t(flipped_age); combined_lines=cbind(flipped_age,noncarrier_lines, carrier_lines); # Combined the matrices for noncarriers and carriers and have the age values
+colnames(combined_lines)<- c("age","lower_non", "median_non", "upper_non", "lower_car", "median_car", "upper_car") #combine carriers and noncarriers
+diff_lines=cbind(flipped_age,diff_lines); colnames(diff_lines)<- c("age","lower", "median", "upper") #separate matrix for difference, honest this could be combined with the previous one
+combined_lines=as.data.frame(combined_lines) #Make it a data frame or none of the plotting works
+# 
+
+
+
+
+plasma_base_bmi_eyo <- subset(plasma_base_bmi, dian_mutpar_eyo > -25)
+
+
+plasma_base_bmi_eyo$Mutation.f <- as.factor(plasma_base_bmi_eyo$Mutation)
+plasma_base_bmi_eyo_NEW <- plasma_base_bmi_eyo %>% dplyr::select(Mutation.f,dian_mutpar_eyo,log_plasma_nfl)
+
+
+Plot=ggplot(plasma_base_bmi_eyo_NEW, aes(x=dian_mutpar_eyo, y=log_plasma_nfl)) 
+Point = geom_point(size=3,aes(color=Mutation.f,shape=Mutation.f), show.legend=F) 
+Color=scale_color_manual(values=c("#A50026", "grey33","#A50026",  "grey33",  "grey33", "grey33",  "#A50026","#A50026"), labels=c('NC', 'MC')) 
+Shape_Labels= scale_shape_discrete(labels=c('NC', 'MC'),solid=TRUE) 
+Ribbon1=geom_ribbon(data = combined_lines, inherit.aes = FALSE, aes(x = age, ymin = lower_car, ymax = upper_car), fill = "#A50026", alpha = 0.4, show.legend=F) 
+Ribbon2=geom_ribbon(data = combined_lines, inherit.aes = FALSE, aes(x = age, ymin = lower_non, ymax = upper_non), fill = "grey33", alpha = 0.4)
+Line_Car = geom_line(data=combined_lines, size=2, aes(x=age, y=median_car, colour = "#A50026"),show.legend=F) # median line for carriers
+Line_Non = geom_line(data=combined_lines, size=2, aes(x=age, y=median_non, colour = "grey33" ),show.legend=F) # median line for noncarriers. Linetype=2 makes it dashed
+Labels=labs(x = "Estimated years to symptom onset", y = bquote(bold(paste( log[10](Plasma~NfL))))) #Add in X and Y axis labels
+#vline= geom_vline (xintercept= -20.7, linetype="dashed", size = 1)
+cx= scale_x_continuous(breaks = c( -30,-20,-10, 0, 10), labels = c( "-30", "-20", "-10", "0", "10"))
+
+Formatting_Scatter = 
+  # theme(axis.title = element_text(family = "Helvetica", color="#666666", face="bold", size=30)) + 
+  theme_bw() +
+  theme(axis.text = element_text(size = 20), axis.title.x=element_blank()) +
+  theme(legend.title=element_blank()) +
+  theme(legend.text=element_text(size=15, family="Helvetica")) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size = 20, face="bold")) + 
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size = 20, face="bold")) +
+  theme(legend.position = "" )+
+  theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent")) 
+
+rstan_log_plasma_base_age_bmi_adj=Plot  +Color + Shape_Labels + Line_Car +Line_Non +Ribbon1 +Ribbon2 +Labels +Formatting_Scatter  +cx
+print(rstan_log_plasma_base_age_bmi_adj)
+
+Color=scale_color_manual(values=c( "grey33","#A50026","#A50026",  "grey33",  "grey33", "grey33",  "#A50026","#A50026"), labels=c('NC', 'MC')) 
+vline= geom_vline (xintercept= -18.9, linetype="dashed", size = 1)
+Point = geom_point(size=3,aes(color=Mutation.f,shape=Mutation.f), show.legend=F) 
+rstan_log_plasma_base_age_bmi_adj_points=Plot + Point +Color + Shape_Labels + Line_Car +Line_Non +Ribbon1 +Ribbon2 +Labels + vline +Formatting_Scatter  +cx
+print(rstan_log_plasma_base_age_bmi_adj_points)
+
+
+Formatting_Scatter = 
+  theme_bw() +
+  theme(axis.text = element_text(size = 25), axis.title.x=element_blank()) +
+  theme(legend.title=element_blank()) +
+  theme(legend.text=element_text(size=15, family="Helvetica")) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size = 35, face="bold")) + 
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size = 35, face="bold")) +
+  theme(legend.position = "" )+
+  theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent")) 
+
+# Difference Plot #
+Diff_Plot=ggplot(data=as.data.frame(diff_lines), aes(x=age, y=median))
+Ribbon3=geom_ribbon(data = as.data.frame(diff_lines), inherit.aes = FALSE, aes(x = age, ymin = lower, ymax = upper), fill = "grey80", alpha = 0.6) 
+Line_Diff = geom_line(data=as.data.frame(diff_lines), size=2, aes(x=age, y=median),show.legend=F) # median line for difference
+zero_line=geom_hline(yintercept=0, linetype="dashed", color = "red")
+vline= geom_vline (xintercept= -18.9, linetype="dashed", size = 1)
+cx= scale_x_continuous(breaks = c( -20, -10, 0, 10), labels = c( "-20", "-10", "0", "10"))
+Labels=labs(x = "Estimated years to symptom onset", y= bquote(bold("MC v NC log"[10](Plasma~NfL)))) #Add in X and Y axis labels
+rstan_lmer_diff_base_logplasma_nfl=Diff_Plot + Labels +cx+ Line_Diff+ Ribbon3 + Line_Diff+zero_line + Labels  + Formatting_Scatter + vline
+print(rstan_lmer_diff_base_logplasma_nfl)
+# 
+```
+
+
+```{r Figure 2c }
+
+plasma_all_bmi <-filter(plasma_all, bmi >0)
+
+plasma_long <-plasma_all_bmi %>% group_by(imagid) %>%
+  filter(n() > 1)
+
+plasma_long$log_plasma_NfL.conc_pg_ml <- log10(plasma_long$PLASMA_NFL)
+mean_eyo <- aggregate(dian_mutpar_eyo~imagid, plasma_long, mean)
+colnames(mean_eyo) <- c("imagid", "mean_eyo")
+earliest_eyo <- aggregate(dian_mutpar_eyo~imagid, plasma_long, min)
+colnames(earliest_eyo) <- c("imagid", "earliest_eyo")
+plasma_long <- merge(plasma_long, earliest_eyo, by = "imagid")
+plasma_long <- merge(plasma_long, mean_eyo, by = "imagid")
+plasma_long$Mutation <- as.factor(plasma_long$Mutation)
+
+
+#create a time variable where zero equals baseline
+plasma_long$time_wrt_base <- plasma_long$dian_mutpar_eyo - plasma_long$earliest_eyo 
+
+
+log_plasma_NfL.conc_pg_ml_slope <-(lmer(log_plasma_NfL.conc_pg_ml  ~ 1 + time_wrt_base + (time_wrt_base|imagid), plasma_long))
+
+beta <- coef(log_plasma_NfL.conc_pg_ml_slope)$imagid
+extracted1 <- tibble::rownames_to_column(beta, "imagid") 
+extracted1
+log_plasma_long_rate<- merge(extracted1, plasma_long, by = "imagid")
+log_plasma_long_rate$log_plasma_nfL_rate <-log_plasma_long_rate$time_wrt_base.x
+summary(log_plasma_long_rate$log_plasma_nfL_rate)
+
+baseline <- aggregate(visit~imagid, log_plasma_long_rate, FUN = "min")
+log_plasma_long_rate_min <- merge(log_plasma_long_rate, baseline, by = c( "visit", "imagid"))
+rm(baseline)
+
+log_plasma_long_rate_min$log_plasma_nfL_rate <- as.numeric(log_plasma_long_rate_min$log_plasma_nfL_rate)
+log_CSF_long_rate_min_bmi <- filter(log_plasma_long_rate_min, bmi >0)
+log_plasma_long_rate_min$bmi_meancenter <- log_plasma_long_rate_min$bmi-27.51965
+log_plasma_long_rate_min$age_meancenter <- log_plasma_long_rate_min$visitage-37.2673
+splinefit=rcspline.eval(log_plasma_long_rate_min$mean_eyo, nk=3, norm=2, pc=FALSE, inclx=TRUE) 
+
+colnames (splinefit) <- c("eyo_linear", "eyo_cubic") 
+log_plasma_long_rate_min = cbind(log_plasma_long_rate_min, splinefit) 
+# running with EYO
+rstan_log_plasma_rate <- stan_glmer(log_plasma_nfL_rate ~ gender + age_meancenter+ bmi_meancenter+ dian_mutpar_eyo*Mutation  + Mutation*eyo_cubic + (1|master_famid), 
+                             data = log_plasma_long_rate_min, family = gaussian(), 
+                             algorithm = "sampling", adapt_delta = 0.99,
+                             prior = cauchy(), prior_intercept = cauchy(),
+                             chains = 8, cores = 1,  iter = 10000, thin = 10)
+
+
+
+parameter_estimates_log <- rstan::extract(rstan_log_plasma_rate$stanfit) 
+factorweights <-cbind(parameter_estimates_log$alpha, parameter_estimates_log$beta) 
+age.1=seq(-25,max(log_plasma_long_rate_min$mean_eyo),by=.1) 
+noncarriers_log=matrix(0,nrow = nrow(factorweights), ncol = length(age.1)); 
+carriers_log=matrix(0,nrow = nrow(factorweights), ncol = length(age.1)) 
+diff_log=matrix(0,nrow = nrow(factorweights), ncol = length(age.1)) 
+contrasts_non_carriers=matrix(0,nrow = length(age.1), ncol = 9);   contrasts_carriers=matrix(0,nrow = length(age.1), ncol = 9) 
+age.1_mat<- as.matrix(age.1)
+for (j in 1:length(age.1)) 
+{tempfit=rcspline.eval(age.1[j],attr(splinefit,'knots'),norm=2, pc=FALSE, inclx=TRUE) 
+contrasts = matrix(c(1,1,
+                     1,1,
+                     1,1,
+                     1,1,
+                     tempfit[1,1],tempfit[1,1],
+                     0,1, 
+                     tempfit[1,2], tempfit[1,2],
+                     0,tempfit[1,1],
+                     0, tempfit[1,2]),
+                   nrow=2, 
+                   ncol=9)
+contrasts_non_carriers[j,]=contrasts[1,]; contrasts_carriers[j,]=contrasts[2,] 
+}
+
+for (i in 1:nrow(factorweights)) {weights = factorweights[i,] 
+for (j in 1:length(age.1)) 
+{
+  contrasts=rbind(contrasts_non_carriers[j,], contrasts_carriers[j,]) 
+  weights_log = contrasts %*% weights 
+  noncarriers_log[i,j]=weights_log[1,]; carriers_log[i,j]=weights_log[2,] 
+  diff_log[i,j]=weights_log[2,]-weights_log[1,] 
+}
+} 
+noncarrier_lines=matrix(0, ncol=3, nrow=length(age.1)); carrier_lines=matrix(0, ncol=3, nrow=length(age.1)); diff_lines=matrix(0, ncol=3, nrow=length(age.1)); 
+
+for (i in 1:ncol(noncarriers_log)) 
+{ temp_non=quantile(noncarriers_log[,i], probs = c(0.05, .5, .95)); temp_non=unname(temp_non) 
+temp_car=quantile(carriers_log[,i], probs = c(0.05, .5, .95)); temp_car=unname(temp_car) 
+temp_diff=quantile(diff_log[,i], probs = c(0.05, .5, .95)); temp_diff=unname(temp_diff) 
+noncarrier_lines[i,1]=temp_non[1];  noncarrier_lines[i,2]=temp_non[2];  noncarrier_lines[i,3]=temp_non[3]
+carrier_lines[i,1]=temp_car[1];  carrier_lines[i,2]=temp_car[2];  carrier_lines[i,3]=temp_car[3] 
+diff_lines[i,1]=temp_diff[1]; diff_lines[i,2]=temp_diff[2]; diff_lines[i,3]=temp_diff[3]; 
+}
+
+flipped_age=t(age.1); flipped_age=t(flipped_age); combined_lines=cbind(flipped_age,noncarrier_lines, carrier_lines); 
+colnames(combined_lines)<- c("age","lower_non", "median_non", "upper_non", "lower_car", "median_car", "upper_car") 
+diff_lines=cbind(flipped_age,diff_lines); colnames(diff_lines) <- c("age","lower", "median", "upper") 
+combined_lines=as.data.frame(combined_lines) 
+log_plasma_long_rate_min$Mutation <- as.factor(log_plasma_long_rate_min$Mutation)
+log_plasma_long_rate_min_eyo <- subset(log_plasma_long_rate_min, mean_eyo > -25)
+
+Plot=ggplot(log_plasma_long_rate_min_eyo, aes(x=mean_eyo, y=log_plasma_nfL_rate)) 
+Point = geom_point(size=5,aes(color=Mutation,shape=Mutation), show.legend=F) 
+Color=scale_color_manual(values=c("grey33","#A50026", "#A50026",  "grey33",  "grey33", "grey33",  "#A50026","#A50026"), labels=c('NC', 'MC')) 
+Shape_Labels= scale_shape_discrete(labels=c('NC', 'MC'),solid=TRUE) 
+Ribbon1=geom_ribbon(data = combined_lines, inherit.aes = FALSE, aes(x = age, ymin = lower_car, ymax = upper_car), fill = "#A50026", alpha = 0.4, show.legend=F) 
+Ribbon2=geom_ribbon(data = combined_lines, inherit.aes = FALSE, aes(x = age, ymin = lower_non, ymax = upper_non), fill = "grey33", alpha = 0.4)
+Line_Car = geom_line(data=combined_lines, size=2, aes(x=age, y=median_car, colour = "#A50026"),show.legend=F) 
+vline= geom_vline (xintercept= -21.2, linetype="dashed", size = 1)
+Line_Non = geom_line(data=combined_lines, size=2, aes(x=age, y=median_non, colour = "grey33" ),show.legend=F) 
+Labels=labs(x = "Estimated years to symptom onset", y = bquote(bold(paste(Delta~log[10](Plasma~NfL)))))
+cx= scale_x_continuous(breaks = c( -20, -10, 0, 10), labels = c("-20","-10", "0", "10"))
+
+Formatting_Scatter = 
+  theme_bw() +
+  theme(axis.text = element_text(size = 20), axis.title.x=element_blank()) +
+  theme(legend.title=element_blank()) +
+  theme(legend.text=element_text(size=15, family="Helvetica")) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size = 20, face="bold")) + 
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size = 20, face="bold")) +
+  theme(legend.position = "" )+
+  theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent")) 
+
+rstan_logplasma_long_nfl_point=Plot +Point +Color + Shape_Labels + Line_Car +Line_Non +Ribbon1 +Ribbon2 +Labels +Formatting_Scatter + vline +cx
+print(rstan_logplasma_long_nfl_point)
+
+Color=scale_color_manual(values=c("#A50026", "grey33","#A50026",  "grey33",  "grey33", "grey33",  "#A50026","#A50026"), labels=c('NC', 'MC')) 
+
+
+rstan_logplasma_long_nfl=Plot +Color + Shape_Labels + Line_Car +Line_Non +Ribbon1 +Ribbon2 +Labels +Formatting_Scatter  +cx
+print(rstan_logplasma_long_nfl)
+
+
+Formatting_Scatter = 
+  theme_bw() +
+  theme(axis.text = element_text(size = 25), axis.title.x=element_blank()) +
+  theme(legend.title=element_blank()) +
+  theme(legend.text=element_text(size=15, family="Helvetica")) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size = 35, face="bold")) + 
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size = 35, face="bold")) +
+  theme(legend.position = "" )+
+  theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent")) 
+
+
+# Difference Plot #
+Diff_Plot=ggplot(data=as.data.frame(diff_lines), aes(x=age, y=median))
+Ribbon3=geom_ribbon(data = as.data.frame(diff_lines), inherit.aes = FALSE, aes(x = age, ymin = lower, ymax = upper), fill = "grey80", alpha = 0.6) 
+Line_Diff = geom_line(data=as.data.frame(diff_lines), size=2, aes(x=age, y=median),show.legend=F) # median line for difference
+zero_line=geom_hline(yintercept=0, linetype="dashed", color = "red")
+vline= geom_vline (xintercept= -21.2, linetype="dashed", size = 1)
+cx= scale_x_continuous(breaks = c(-30, -20,-10, 0, 10), labels = c("-30", "-20","-10", "0", "10"))
+Labels=labs(x = "Estimated years to symptom onset", y= bquote(bold(paste( "MC vs NC"~ Delta, ~log[10](Plasma~NfL)))))  #Add in X and Y axis labels
+rstan_lmer_diff_long_logplasma_nfl=Diff_Plot + Labels +cx+ Ribbon3 + Line_Diff+ zero_line + Labels  +vline+ Formatting_Scatter
+print(rstan_lmer_diff_long_logplasma_nfl)
+
+
+
+
+
+```
+
+
+
+```{r Figure 2d}
+
+CSF_all  <- CSF_all %>% filter(dian_mutpar_eyo > -100 )
+CSF_long <-CSF_all %>% group_by(imagid) %>%
+  filter(n() > 1)
+CSF_long$log_CSF_NFL <- log10(CSF_long$CSF_NFL)
+CSF_long$Mutation <- as.factor(CSF_long$Mutation)
+
+
+earliest_eyo <- aggregate(dian_mutpar_eyo~imagid, CSF_long, min)
+colnames(earliest_eyo) <- c("imagid", "earliest_eyo")
+CSF_long <- merge(CSF_long, earliest_eyo, by = "imagid")
+mean_eyo <- aggregate(dian_mutpar_eyo~imagid, CSF_long, mean)
+colnames(mean_eyo) <- c("imagid", "mean_eyo")
+CSF_long <- merge(CSF_long, mean_eyo, by = "imagid")
+
+#create a time variable where zero equals baseline
+CSF_long$time_wrt_base <- CSF_long$dian_mutpar_eyo - CSF_long$earliest_eyo 
+log_CSF_NfL.conc_pg_ml_slope <-(lmer(log_CSF_NFL  ~ 1 + time_wrt_base + (time_wrt_base|imagid), CSF_long))
+beta <- coef(log_CSF_NfL.conc_pg_ml_slope)$imagid
+extracted1 <- tibble::rownames_to_column(beta, "imagid") # Apply rownames_to_column
+extracted1
+log_CSF_long_rate<- merge(extracted1, CSF_long, by = "imagid")
+log_CSF_long_rate$log_csf_nfL_rate <-log_CSF_long_rate$time_wrt_base.x
+summary(log_CSF_long_rate$log_csf_nfL_rate)
+baseline <- aggregate(visit~imagid, log_CSF_long_rate, FUN = "min")
+log_CSF_long_rate_min <- merge(log_CSF_long_rate, baseline, by = c( "visit", "imagid"))
+rm(baseline)
+
+log_CSF_long_rate_min_bmi <- filter(log_CSF_long_rate_min, bmi >0)
+mean(log_CSF_long_rate_min_bmi$bmi)
+log_CSF_long_rate_min_bmi$bmi_meancenter <- log_CSF_long_rate_min_bmi$bmi-27.33995
+mean(log_CSF_long_rate_min_bmi$visitage)
+log_CSF_long_rate_min_bmi$age_meancenter <- log_CSF_long_rate_min_bmi$visitage-36.925
+splinefit=rcspline.eval(log_CSF_long_rate_min_bmi$mean_eyo, nk=3, norm=2, pc=FALSE, inclx=TRUE) #
+colnames (splinefit) <- c("eyo_linear", "eyo_cubic") 
+log_CSF_long_rate_min_bmi = cbind(log_CSF_long_rate_min_bmi, splinefit) 
+
+# running with EYO
+rstan_CSF_rate <- stan_glmer(log_csf_nfL_rate ~ age_meancenter+ bmi_meancenter+gender +dian_mutpar_eyo*Mutation  + Mutation*eyo_cubic + (1|master_famid), 
+                             data = log_CSF_long_rate_min_bmi, family = gaussian(), 
+                             algorithm = "sampling", adapt_delta = 0.99,
+                             prior = cauchy(), prior_intercept = cauchy(),
+                             chains = 8, cores = 1,  iter = 10000, thin = 10)
+
+parameter_estimates_log <- rstan::extract(rstan_CSF_rate$stanfit) 
+factorweights <-cbind(parameter_estimates_log$alpha, parameter_estimates_log$beta) 
+age.1=seq(-25,max(log_CSF_long_rate_min_bmi$mean_eyo),by=.1) 
+noncarriers_log=matrix(0,nrow = nrow(factorweights), ncol = length(age.1)); 
+carriers_log=matrix(0,nrow = nrow(factorweights), ncol = length(age.1)) 
+diff_log=matrix(0,nrow = nrow(factorweights), ncol = length(age.1)) 
+contrasts_non_carriers=matrix(0,nrow = length(age.1), ncol = 9);   contrasts_carriers=matrix(0,nrow = length(age.1), ncol = 9) 
+
+age.1_mat<- as.matrix(age.1)
+
+for (j in 1:length(age.1)) 
+{tempfit=rcspline.eval(age.1[j],attr(splinefit,'knots'),norm=2, pc=FALSE, inclx=TRUE) 
+contrasts = matrix(c(1,1,
+                     1,1,
+                     1,1, 
+                     1,1,
+                     tempfit[1,1],tempfit[1,1],
+                     0,1, 
+                     tempfit[1,2], tempfit[1,2],
+                     0,tempfit[1,1],
+                     0, tempfit[1,2]),
+                   nrow=2, 
+                   ncol=9)
+contrasts_non_carriers[j,]=contrasts[1,]; contrasts_carriers[j,]=contrasts[2,] 
+}
+
+
+for (i in 1:nrow(factorweights)) {weights = factorweights[i,] 
+for (j in 1:length(age.1)) 
+{
+  contrasts=rbind(contrasts_non_carriers[j,], contrasts_carriers[j,]) 
+  weights_log = contrasts %*% weights 
+  noncarriers_log[i,j]=weights_log[1,]; carriers_log[i,j]=weights_log[2,] 
+  diff_log[i,j]=weights_log[2,]-weights_log[1,] 
+}
+} 
+noncarrier_lines=matrix(0, ncol=3, nrow=length(age.1)); carrier_lines=matrix(0, ncol=3, nrow=length(age.1)); diff_lines=matrix(0, ncol=3, nrow=length(age.1)); 
+for (i in 1:ncol(noncarriers_log)) 
+{ temp_non=quantile(noncarriers_log[,i], probs = c(0.05, .5, .95)); temp_non=unname(temp_non) 
+temp_car=quantile(carriers_log[,i], probs = c(0.05, .5, .95)); temp_car=unname(temp_car) 
+temp_diff=quantile(diff_log[,i], probs = c(0.05, .5, .95)); temp_diff=unname(temp_diff) 
+noncarrier_lines[i,1]=temp_non[1];  noncarrier_lines[i,2]=temp_non[2];  noncarrier_lines[i,3]=temp_non[3] 
+carrier_lines[i,1]=temp_car[1];  carrier_lines[i,2]=temp_car[2];  carrier_lines[i,3]=temp_car[3] 
+diff_lines[i,1]=temp_diff[1]; diff_lines[i,2]=temp_diff[2]; diff_lines[i,3]=temp_diff[3]; 
+}
+
+flipped_age=t(age.1); flipped_age=t(flipped_age); combined_lines=cbind(flipped_age,noncarrier_lines, carrier_lines); 
+colnames(combined_lines)<- c("age","lower_non", "median_non", "upper_non", "lower_car", "median_car", "upper_car") 
+diff_lines=cbind(flipped_age,diff_lines); colnames(diff_lines)<- c("age","lower", "median", "upper") 
+combined_lines=as.data.frame(combined_lines) 
+log_CSF_long_rate_min_bmi$Mutation.f <- as.factor(log_CSF_long_rate_min_bmi$Mutation)
+log_CSF_long_rate_min_bmi_eyo <- subset(log_CSF_long_rate_min_bmi, mean_eyo > -25)
+
+Plot=ggplot(log_CSF_long_rate_min_bmi_eyo, aes(x=mean_eyo, y=log_csf_nfL_rate)) 
+Point = geom_point(size=5,aes(color=Mutation.f,shape=Mutation.f), show.legend=F) 
+Color=scale_color_manual(values=c("#A50026", "grey33","#A50026",  "grey33",  "grey33", "grey33",  "#A50026","#A50026"), labels=c('NC', 'MC')) 
+Shape_Labels= scale_shape_discrete(labels=c('NC', 'MC'),solid=TRUE) 
+Ribbon1=geom_ribbon(data = combined_lines, inherit.aes = FALSE, aes(x = age, ymin = lower_car, ymax = upper_car), fill = "#A50026", alpha = 0.4, show.legend=F) 
+Ribbon2=geom_ribbon(data = combined_lines, inherit.aes = FALSE, aes(x = age, ymin = lower_non, ymax = upper_non), fill = "grey33", alpha = 0.4)
+Line_Car = geom_line(data=combined_lines, size=2, aes(x=age, y=median_car, colour = "#A50026"),show.legend=F) 
+Line_Non = geom_line(data=combined_lines, size=2, aes(x=age, y=median_non, colour = "grey33" ),show.legend=F) 
+Labels=labs(x = "Estimated years to symptom onset", y = bquote(bold(paste( Delta, ~log[10](CSF~NfL))))) 
+cx= scale_x_continuous(breaks = c( -30,-20,-10, 0,10), labels = c("-30", "-20", "-10", "0", "10"))
+
+Formatting_Scatter = 
+  theme_bw() +
+  theme(axis.text = element_text(size = 25), axis.title.x=element_blank()) +
+  theme(legend.title=element_blank()) +
+  theme(legend.text=element_text(size=15, family="Helvetica")) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size = 35, face="bold")) + 
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size = 35, face="bold")) +
+  theme(legend.position = "" )+
+  theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent")) 
+
+rstan_log_CSF_long_age_bmi_adj=Plot  +Point+Color + Shape_Labels + Line_Car +Line_Non +Ribbon1 +Ribbon2 +Labels +Formatting_Scatter  +cx
+print(rstan_log_CSF_long_age_bmi_adj)
+
+
+log_CSF_long_rate_min_bmi$Mutation.f <- as.factor(log_CSF_long_rate_min_bmi$Mutation)
+
+
+Plot=ggplot(log_CSF_long_rate_min_bmi, aes(x=mean_eyo, y=log_csf_nfL_rate)) 
+Point = geom_point(size=3,aes(color=Mutation.f,shape=Mutation.f), show.legend=F) 
+Color=scale_color_manual(values=c("#A50026", "grey33","#A50026",  "grey33",  "grey33", "grey33",  "#A50026","#A50026"), labels=c('NC', 'MC')) 
+Shape_Labels= scale_shape_discrete(labels=c('NC', 'MC'),solid=TRUE) 
+Ribbon1=geom_ribbon(data = combined_lines, inherit.aes = FALSE, aes(x = age, ymin = lower_car, ymax = upper_car), fill = "#A50026", alpha = 0.4, show.legend=F) 
+Ribbon2=geom_ribbon(data = combined_lines, inherit.aes = FALSE, aes(x = age, ymin = lower_non, ymax = upper_non), fill = "grey33", alpha = 0.4)
+Line_Car = geom_line(data=combined_lines, size=2, aes(x=age, y=median_car, colour = "#A50026"),show.legend=F)
+Line_Non = geom_line(data=combined_lines, size=2, aes(x=age, y=median_non, colour = "grey33" ),show.legend=F) 
+Labels=labs(x = "Estimated years to symptom onset", y = bquote(bold(paste( Delta, ~log[10](CSF~NfL))))) 
+vline= geom_vline (xintercept= -7.6, linetype="dashed", size = 1)
+cx= scale_x_continuous(breaks = c( -20, -7.6, 0, 10), labels = c( "-20", "-7.6","0", "10"))
+
+Formatting_Scatter = 
+  theme_bw() +
+  theme(axis.text = element_text(size = 20), axis.title.x=element_blank()) +
+  theme(legend.title=element_blank()) +
+  theme(legend.text=element_text(size=15, family="Helvetica")) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size = 20, face="bold")) + 
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size = 20, face="bold")) +
+  theme(legend.position = "" )+
+  theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent")) 
+
+rstan_log_CSF_long_age_bmi_adj=Plot  +Color + Shape_Labels + Line_Car +Line_Non +Ribbon1 +Ribbon2 +Labels +Formatting_Scatter  +cx
+print(rstan_log_CSF_long_age_bmi_adj)
+
+
+
+Formatting_Scatter = 
+  theme_bw() +
+  theme(axis.text = element_text(size = 25), axis.title.x=element_blank()) +
+  theme(legend.title=element_blank()) +
+  theme(legend.text=element_text(size=15, family="Helvetica")) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size = 35, face="bold")) + 
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size = 35, face="bold")) +
+  theme(legend.position = "" )+
+  theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent")) 
+
+# Difference Plot #
+Diff_Plot=ggplot(data=as.data.frame(diff_lines), aes(x=dian_mutpar_eyo, y=median))
+Ribbon3=geom_ribbon(data = as.data.frame(diff_lines), inherit.aes = FALSE, aes(x = age, ymin = lower, ymax = upper), fill = "grey80", alpha = 0.6) 
+Line_Diff = geom_line(data=as.data.frame(diff_lines), size=2, aes(x=age, y=median),show.legend=F) # median line for difference
+zero_line=geom_hline(yintercept=0, linetype="dashed", color = "red")
+cx= scale_x_continuous(breaks = c(-30, -20, -10, 0, 10), labels = c("-30", "-20", "-10", "0", "10"))
+Labels=labs(x = "Estimated years to symptom onset", y = bquote(bold(paste( "MC v NC"~ Delta, ~log[10](CSF~NfL))))) 
+vline= geom_vline (xintercept= -21.2, linetype="dashed", size = 1)
+
+rstan_lmer_diff_rate_CSF_log_nfl=Diff_Plot + vline+Labels +cx+ Ribbon3 + zero_line + Labels  + Formatting_Scatter +Line_Diff
+print(rstan_lmer_diff_rate_CSF_log_nfl)
+
+```
+
+```{r plotting figure 2 and figure s1}
+
+
+rstan_Figure_2<-plot_grid(rstan_log_plasma_base_age_bmi_adj,rstan_log_CSF_base_age_bmi_adj,rstan_logplasma_long_nfl,rstan_log_CSF_long_age_bmi_adj  ,nrow = 2, hjust=0, labels = "AUTO", label_size = 25)
+
+dev.new()
+pdf("/Users/sws59/Dropbox (Partners HealthCare)/DIAN_Mathias_collab/NfL_paper/NC_submission/Rev_2/Figures_tables/Figure_2.pdf", width=18, height=10)
+rstan_Figure_2
+dev.off()
+
+
+
+rstan_Figure_S1<-plot_grid(rstan_lmer_diff_base_logplasma_nfl, rstan_lmer_diff_base_CSF_log_nfl, rstan_lmer_diff_long_logplasma_nfl ,rstan_lmer_diff_rate_CSF_log_nfl ,nrow = 2, hjust=0, label_size = 25, labels = "AUTO")
+
+dev.new()
+pdf("/Users/sws59/Dropbox (Partners HealthCare)/DIAN_Mathias_collab/NfL_paper/NC_submission/Rev_2/Figures_tables/Figure_S1.pdf", width=25, height=19)
+rstan_Figure_S1
+dev.off()
+
+```
+
+
+
+```{r Figure S2A-D}
+
+# CX plasma NfL
+
+#MC
+plasma_base_bmi_MC <- plasma_base_bmi %>% subset(Mutation.1 == "1")
+age_plasma_nfl_base_mc.lm <- lm(log_plasma_nfl~bmi_meancenter+age_meancenter+gender+dian_mutpar_eyo, data=plasma_base_bmi_MC) 
+summary(age_plasma_nfl_base_mc.lm ) 
+summary(my.seg<-segmented(age_plasma_nfl_base_mc.lm , seg.Z=~dian_mutpar_eyo)) 
+plasma_base_bmi_MC$age_cat_csf <- ifelse(plasma_base_bmi_MC$dian_mutpar_eyo > -11.458,c("high"), c("low")) 
+plasma_base_bmi_MC$age_cat_csf <-as.factor(plasma_base_bmi_MC$age_cat_csf) 
+
+#NC
+plasma_base_bmi_NC <- plasma_base_bmi %>% dplyr::select(Mutation,bmi_meancenter,age_meancenter,dian_mutpar_eyo,gender,log_plasma_nfl) %>% filter (Mutation==0)
+age_plasma_nfl_base_nc.lm <- lm(log_plasma_nfl~bmi_meancenter+age_meancenter+gender+dian_mutpar_eyo, data=plasma_base_bmi_NC) 
+summary(age_plasma_nfl_base_nc.lm ) 
+summary(my.seg<-segmented(age_plasma_nfl_base_nc.lm , seg.Z=~dian_mutpar_eyo)) 
+plasma_base_bmi_NC$age_cat_csf <- ifelse(plasma_base_bmi_NC$dian_mutpar_eyo > -4.183,c("high"), c("low")) 
+plasma_base_bmi_NC$age_cat_csf <-as.factor(plasma_base_bmi_NC$age_cat_csf) 
+plasma_base_bmi_MC <- plasma_base_bmi_MC %>% dplyr::filter(dian_mutpar_eyo > -25)
+plasma_base_bmi_NC <- plasma_base_bmi_NC %>% dplyr::filter(dian_mutpar_eyo > -25)
+
+Formatting_Scatter = 
+  theme(axis.title = element_text( face="bold", size=50)) + 
+  theme_bw() +
+  theme(axis.text = element_text(size = 25), axis.title.x=element_blank()) +
+  theme(plot.title = element_text( face="bold", size=20, hjust=.5 )) +
+  theme(legend.title=element_blank())+
+  theme(legend.text=element_text(size=25)) +
+  theme(axis.title.y = element_text( size=35, margin = margin(t = 0, r = 20, b = 0, l = 0))) +
+  theme(axis.title.x = element_text( size=35,margin = margin(t = 20, r = 0, b = 0, l = 0))) +
+  theme(legend.position = c(0.25,0.85)) + #may need to adjust location depending on where the data are
+  theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent")) + #Make background of legends transparent
+  theme(axis.line = element_line())
+Plot=ggplot(plasma_base_bmi_MC, aes(x=dian_mutpar_eyo, y=log_plasma_nfl))
+Point = geom_point(size=3,colour="#A50026", shape=16)
+Line_MC = geom_smooth(data=plasma_base_bmi_MC, method="lm", size=1, colour="#A50026", fill = "#A50026", aes(x=dian_mutpar_eyo, y=log_plasma_nfl, group=age_cat_csf), show.legend=F) 
+Line_NC = geom_smooth(data=plasma_base_bmi_NC, method="lm", size=1, colour="grey33", aes(x=dian_mutpar_eyo, y=log_plasma_nfl, group=age_cat_csf), show.legend=F) 
+Labels=labs(x = "Estimated years to symptom onset", y = bquote(bold(paste(log[10](Plamsa~NfL))))) 
+baseline_log_plasma_nfl_piecewise=Plot   + Line_MC +Line_NC +Labels +Formatting_Scatter 
+print(baseline_log_plasma_nfl_piecewise)
+
+# Cx CSF NfL
+CSF_base_bmi_MC <- CSF_base_bmi %>% dplyr::select(Mutation,bmi_meancenter,age_meancenter,dian_mutpar_eyo,gender,log_CSF_NFL) %>% filter (Mutation==1)
+
+#MC
+age_csf_nfl_base_mc.lm <- lm(log_CSF_NFL~bmi_meancenter+age_meancenter+gender+dian_mutpar_eyo, data=CSF_base_bmi_MC) 
+summary(age_csf_nfl_base_mc.lm ) 
+summary(my.seg<-segmented(age_csf_nfl_base_mc.lm , seg.Z=~dian_mutpar_eyo))
+CSF_base_bmi_MC$age_cat_csf <- ifelse(CSF_base_bmi_MC$dian_mutpar_eyo > -16.197,c("high"), c("low")) 
+CSF_base_bmi_MC$age_cat_csf <-as.factor(CSF_base_bmi_MC$age_cat_csf) 
+CSF_base_bmi_NC <- CSF_base_bmi %>% dplyr::select(Mutation,bmi_meancenter,age_meancenter,dian_mutpar_eyo,gender,log_CSF_NFL) %>% filter (Mutation==0)
+
+#NC
+age_csf_nfl_base_nc.lm <- lm(log_CSF_NFL~bmi_meancenter+age_meancenter+gender+dian_mutpar_eyo, data=CSF_base_bmi_NC) 
+summary(age_csf_nfl_base_nc.lm ) 
+summary(my.seg<-segmented(age_csf_nfl_base_nc.lm , seg.Z=~dian_mutpar_eyo))
+CSF_base_bmi_NC$age_cat_csf <- ifelse(CSF_base_bmi_NC$dian_mutpar_eyo > -26.086,c("high"), c("low"))
+CSF_base_bmi_NC$age_cat_csf <-as.factor(CSF_base_bmi_NC$age_cat_csf) 
+
+CSF_base_bmi_MC <- CSF_base_bmi_MC %>% dplyr::filter(dian_mutpar_eyo > -25)
+CSF_base_bmi_NC <- CSF_base_bmi_NC %>% dplyr::filter(dian_mutpar_eyo > -25)
+
+Formatting_Scatter = 
+  theme(axis.title = element_text( face="bold", size=50)) + 
+  theme_bw() +
+  theme(axis.text = element_text(size = 25), axis.title.x=element_blank()) +
+  theme(plot.title = element_text( face="bold", size=20, hjust=.5 )) +
+  theme(legend.title=element_blank())+
+  theme(legend.text=element_text(size=25)) +
+  theme(axis.title.y = element_text( size=35, margin = margin(t = 0, r = 20, b = 0, l = 0))) +
+  theme(axis.title.x = element_text( size=35,margin = margin(t = 20, r = 0, b = 0, l = 0))) +
+  theme(legend.position = c(0.25,0.85)) + #may need to adjust location depending on where the data are
+  theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent")) + 
+  theme(axis.line = element_line())
+Plot=ggplot(CSF_base_bmi_MC, aes(x=dian_mutpar_eyo, y=log_CSF_NFL))
+Point = geom_point(size=3,colour="#A50026", shape=16)#point for each timepoint
+Line_MC = geom_smooth(data=CSF_base_bmi_MC, method="lm", size=1, colour="#A50026", fill = "#A50026", aes(x=dian_mutpar_eyo, y=log_CSF_NFL, group=age_cat_csf), show.legend=F) 
+Line_NC = geom_smooth(data=CSF_base_bmi_NC, method="lm", size=1, colour="grey33", aes(x=dian_mutpar_eyo, y=log_CSF_NFL, group=age_cat_csf), show.legend=F) 
+Labels=labs(x = "Estimated years to symptom onset", y = bquote(bold(paste(log[10](CSF~NfL))))) 
+baseline_log_CSF_nfl_piecewise=Plot +Line_MC +Line_NC +Labels +Formatting_Scatter 
+print(baseline_log_CSF_nfl_piecewise)
+
+# Rate plasma NfL
+
+#MC
+log_plasma_long_rate_min_MC <- log_plasma_long_rate_min %>% dplyr::select(Mutation,bmi_meancenter,age_meancenter,dian_mutpar_eyo,gender,log_plasma_nfL_rate) %>% filter (Mutation==1) 
+age_plama_nfl_rate_mc.lm <- lm(log_plasma_nfL_rate~bmi_meancenter+age_meancenter+gender+dian_mutpar_eyo, data=log_plasma_long_rate_min_MC) 
+summary(age_plama_nfl_rate_mc.lm ) 
+summary(my.seg<-segmented(age_plama_nfl_rate_mc.lm , seg.Z=~dian_mutpar_eyo)) 
+log_plasma_long_rate_min_MC$age_cat_plasma_rate <- ifelse(log_plasma_long_rate_min_MC$dian_mutpar_eyo > 3.46,c("high"), c("low")) 
+log_plasma_long_rate_min_MC$age_cat_plasma_rate <-as.factor(log_plasma_long_rate_min_MC$age_cat_plasma_rate) 
+
+#NC
+log_plasma_long_rate_min_NC <- log_plasma_long_rate_min %>% dplyr::select(Mutation,bmi_meancenter,age_meancenter,dian_mutpar_eyo,gender,log_plasma_nfL_rate) %>% filter (Mutation==0)
+age_plama_nfl_rate_nc.lm <- lm(log_plasma_nfL_rate~bmi_meancenter+age_meancenter+gender+dian_mutpar_eyo, data=log_plasma_long_rate_min_NC) 
+summary(age_plama_nfl_rate_nc.lm ) 
+summary(my.seg<-segmented(age_plama_nfl_rate_nc.lm , seg.Z=~dian_mutpar_eyo)) 
+log_plasma_long_rate_min_NC$age_cat_plasma_rate <- ifelse(log_plasma_long_rate_min_NC$dian_mutpar_eyo > 3.586,c("high"), c("low"))
+log_plasma_long_rate_min_NC$age_cat_plasma_rate <-as.factor(log_plasma_long_rate_min_NC$age_cat_plasma_rate) 
+
+log_plasma_long_rate_min_MC <- log_plasma_long_rate_min_MC %>% dplyr::filter(dian_mutpar_eyo > -25)
+log_plasma_long_rate_min_NC <- log_plasma_long_rate_min_NC %>% dplyr::filter(dian_mutpar_eyo > -25)
+
+
+Formatting_Scatter = 
+  theme_bw() +
+  theme(axis.text = element_text(size = 25), axis.title.x=element_blank()) +
+  theme(plot.title = element_text( face="bold", size=20, hjust=.5 )) +
+  theme(legend.title=element_blank())+
+  theme(legend.text=element_text(size=25)) +
+  theme(axis.title.y = element_text( size=35, margin = margin(t = 0, r = 20, b = 0, l = 0))) +
+  theme(axis.title.x = element_text( size=35,margin = margin(t = 20, r = 0, b = 0, l = 0))) +
+  theme(legend.position = c(0.25,0.85)) + 
+  theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent")) + 
+  theme(axis.line = element_line())
+Plot=ggplot(log_plasma_long_rate_min_MC, aes(x=dian_mutpar_eyo, y=log_plasma_nfL_rate))
+Point = geom_point(size=3,colour="#A50026", shape=16)
+Line_MC = geom_smooth(data=log_plasma_long_rate_min_MC, method="lm", size=1, colour="#A50026", fill = "#A50026", aes(x=dian_mutpar_eyo, y=log_plasma_nfL_rate, group=age_cat_plasma_rate), show.legend=F) 
+Line_NC = geom_smooth(data=log_plasma_long_rate_min_NC, method="lm", size=1, colour="grey33", aes(x=dian_mutpar_eyo, y=log_plasma_nfL_rate, group=age_cat_plasma_rate), show.legend=F) 
+Labels=labs(x = "Estimated years to symptom onset", y = bquote(bold(paste( Delta, ~log[10](Plamsa~NfL))))) 
+rate_log_plasma_nfl_piecewise=Plot   + Line_MC +Line_NC +Labels +Formatting_Scatter 
+print(rate_log_plasma_nfl_piecewise)
+
+
+# Rate CSF NfL
+
+#MC
+log_CSF_long_rate_min_bmi_MC <- log_CSF_long_rate_min_bmi %>% dplyr::select(Mutation,bmi_meancenter,age_meancenter,dian_mutpar_eyo,gender,log_csf_nfL_rate) %>% filter (Mutation==1) 
+age_csf_nfl_rate_mc.lm <- lm(log_csf_nfL_rate~bmi_meancenter+age_meancenter+gender+dian_mutpar_eyo, data=log_CSF_long_rate_min_bmi_MC)
+summary(age_csf_nfl_rate_mc.lm ) 
+summary(my.seg<-segmented(age_csf_nfl_rate_mc.lm , seg.Z=~dian_mutpar_eyo)) 
+log_CSF_long_rate_min_bmi_MC$age_cat_csf <- ifelse(log_CSF_long_rate_min_bmi_MC$dian_mutpar_eyo > -22.635,c("high"), c("low")) 
+log_CSF_long_rate_min_bmi_MC$age_cat_csf <-as.factor(log_CSF_long_rate_min_bmi_MC$age_cat_csf) 
+
+#NC
+log_CSF_long_rate_min_bmi_NC <- log_CSF_long_rate_min_bmi %>% dplyr::select(Mutation,bmi_meancenter,age_meancenter,dian_mutpar_eyo,gender,log_csf_nfL_rate) %>% filter (Mutation==0)
+age_csf_nfl_rate_nc.lm <- lm(log_csf_nfL_rate~bmi_meancenter+age_meancenter+gender+dian_mutpar_eyo, data=log_CSF_long_rate_min_bmi_NC) 
+summary(age_csf_nfl_rate_nc.lm ) 
+summary(my.seg<-segmented(age_csf_nfl_rate_nc.lm , seg.Z=~dian_mutpar_eyo))
+
+log_CSF_long_rate_min_bmi_MC <- log_CSF_long_rate_min_bmi_MC %>% dplyr::filter(dian_mutpar_eyo > -25)
+log_CSF_long_rate_min_bmi_NC <- log_CSF_long_rate_min_bmi_NC %>% dplyr::filter(dian_mutpar_eyo > -25)
+
+
+Formatting_Scatter =  
+  theme_bw() +
+  theme(axis.text = element_text(size = 25), axis.title.x=element_blank()) +
+  theme(plot.title = element_text( face="bold", size=20, hjust=.5 )) +
+  theme(legend.title=element_blank())+
+  theme(legend.text=element_text(size=25)) +
+  theme(axis.title.y = element_text( size=35, margin = margin(t = 0, r = 20, b = 0, l = 0))) +
+  theme(axis.title.x = element_text( size=35,margin = margin(t = 20, r = 0, b = 0, l = 0))) +
+  theme(legend.position = c(0.25,0.85)) + 
+  theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent")) + 
+  theme(axis.line = element_line())
+Plot=ggplot(log_CSF_long_rate_min_bmi_MC, aes(x=dian_mutpar_eyo, y=log_csf_nfL_rate))
+Point = geom_point(size=3,colour="#A50026", shape=16)
+Line_MC = geom_smooth(data=log_CSF_long_rate_min_bmi_MC, method="lm", size=1, colour="#A50026",fill = "#A50026", aes(x=dian_mutpar_eyo, y=log_csf_nfL_rate, group=age_cat_csf), show.legend=F) 
+Line_NC = geom_smooth(data=log_CSF_long_rate_min_bmi_NC, method="lm", size=1, colour="grey33", aes(x=dian_mutpar_eyo, y=log_csf_nfL_rate), show.legend=F) 
+Labels=labs(x = "Estimated years to symptom onset", y = bquote(bold(paste( Delta, ~log[10](Plamsa~NfL))))) 
+rate_log_csf_nfl_piecewise=Plot   + Line_MC +Line_NC +Labels +Formatting_Scatter
+print(rate_log_csf_nfl_piecewise)
+
+
+```
+
+```{r GAM models}
+
+
+# CX plasma NfL
+
+model_logplasmanfl <- gam(log_plasma_nfl ~ s(age_meancenter)+ bmi_meancenter+ gender +s(dian_mutpar_eyo, k = 4, by=Mutation), data = plasma_base_bmi)
+
+
+plasma_base_bmi$Mutation <- as.factor(plasma_base_bmi$Mutation)
+plasma_base_bmi$log_CSF_NFL <- log10(plasma_base_bmi$CSF_NFL)
+plasma_base_bmi$cohort <- as.factor(ifelse(plasma_base_bmi$Mutation == 0, "NC", "MC"))
+plasma_base_bmi$EYO <- plasma_base_bmi$dian_mutpar_eyo
+
+df <- plasma_base_bmi %>% dplyr::select("CSF_NFL", "cohort", "age_meancenter", "EYO" , "bmi_meancenter", "gender", "log_plasma_nfl")
+
+df_predict <- expand.grid("EYO" = seq(from = -25, to = 15, by = 1),
+                           "cohort" = unique(df$cohort), 
+                           "age_meancenter" = mean(df$age_meancenter), 
+                           "bmi_meancenter" =mean(df$bmi_meancenter),
+                           "gender" =.5)
+
+df <- within(df, cohort <- relevel(cohort, ref = "NC"))
+
+model_logplasmanfl <- gam(log_plasma_nfl ~ s(age_meancenter)+ bmi_meancenter+ gender +s(EYO,cohort , bs = "fs"), data = df, method = "REML")
+summary(model_logplasmanfl)
+
+rmvn <- function(n, mu, sig) { # MVN random deviates
+  L <- mroot(sig)
+  m <- ncol(L)
+  t(mu + L %*% matrix(rnorm(m*n), m, n))
+}
+
+get_splineBasedCI <- function(Model, Forecast_DF){
+  Vb <- vcov(Model)
+  pred <- predict(Model, Forecast_DF, se.fit = TRUE)
+  se.fit <- pred$se.fit
+  set.seed(42)
+  N <- 10000
+  
+  BUdiff <- rmvn(N, mu = rep(0, nrow(Vb)), sig = Vb)
+  Cg <- predict(Model, Forecast_DF, type = "lpmatrix")
+  simDev <- Cg %*% t(BUdiff)
+  
+  absDev <- abs(sweep(simDev, 1, se.fit, FUN = "/"))
+  masd <- apply(absDev, 2L, max)
+  crit <- quantile(masd, prob = 0.95, type = 8)
+  
+  pred <- transform(cbind(data.frame(pred), Forecast_DF),
+                    uprP = fit + (2 * se.fit),
+                    lwrP = fit - (2 * se.fit),
+                    uprS = fit + (crit * se.fit),
+                    lwrS = fit - (crit * se.fit))
+  return(pred)
+}
+
+get_overlap_check <- function(cohort1_name, cohort2_name, forecast_df){
+  check_for_overlap <- cbind(forecast_df[forecast_df$cohort == cohort1_name, c("EYO", "fit", "lwrS", "uprS")],
+                             forecast_df[forecast_df$cohort == cohort2_name, c("fit", "lwrS", "uprS")])
+  colnames(check_for_overlap) <- c("EYO", "fit_c1", "lwrS_c1", "uprS_c1", "fit_c2", "lwrS_c2", "uprS_c2")
+  check_for_overlap$difference <- ifelse(check_for_overlap$lwrS_c1 > check_for_overlap$uprS_c2 | 
+                                           check_for_overlap$uprS_c1 < check_for_overlap$lwrS_c2, "Different", "No Difference")
+  colnames(check_for_overlap) <- c("EYO", paste0("fit_", cohort1_name), paste0("lwrS_", cohort1_name), paste0("uprS_", cohort1_name),
+                                   paste0("fit_", cohort2_name), paste0("lwrS_", cohort2_name), paste0("uprS_", cohort2_name),
+                                   "difference")
+  return(check_for_overlap)}
+
+
+get_difference_plot <- function(overlap_df_amyloid, light_color, plot_title, y_axis_title, YPOS = 0){
+  age_centiloids_changes <- max(overlap_df_amyloid[overlap_df_amyloid[,"difference"] == "No Difference", "EYO"]) + 1
+ 
+  p <- ggplot(show.legend  = FALSE) +
+    geom_smooth(data = overlap_df_amyloid, aes(x = EYO, y = fit_diff, colour = light_color), show.legend  = FALSE) +
+    geom_ribbon(data = overlap_df_amyloid, aes(x = EYO,
+                                               ymin = lwr_diff,
+                                               ymax = upr_diff, fill = light_color), alpha = 0.2, show.legend  = FALSE) +
+xlab(bquote(bold("EYO")))+
+    scale_colour_manual(values = c(light_color), name = "", labels = c( "CSF NfL")) +
+    scale_fill_manual(values = c(light_color), name = "", labels = c("CSF NfL")) +
+    theme_bw() +
+    geom_vline(xintercept = age_centiloids_changes,
+               colour = light_color) +
+    ylab(y_axis_title) +
+  theme(axis.title = element_text(size = 25), 
+        axis.text = element_text(size = 20), legend.text = element_text(size = 25))
+  if(age_centiloids_changes == age_centiloids_changes){
+    p <- p + annotate('text', x = age_centiloids_changes - 1, y = YPOS, hjust = -.0,
+                      label = paste0("Plasma NfL significantly differs at EYO = ", age_centiloids_changes),
+                      size = 5, angle = '90') 
+  }
+  return(p)
+}
+
+
+plasma_base_forecast <- get_splineBasedCI(model_logplasmanfl, df_predict)
+overlap_MC_NC_plasma<- get_overlap_check("MC", "NC", plasma_base_forecast)
+
+#calculating the differences between cases and controls
+overlap_MC_NC_plasma$fit_diff <- overlap_MC_NC_plasma$fit_MC - overlap_MC_NC_plasma$fit_NC
+overlap_MC_NC_plasma$lwr_diff <- overlap_MC_NC_plasma$lwrS_MC - overlap_MC_NC_plasma$uprS_NC
+overlap_MC_NC_plasma$upr_diff <- overlap_MC_NC_plasma$uprS_MC - overlap_MC_NC_plasma$lwrS_NC
+                    
+
+plasma_nfl_plot <- ggplot(subset(df,EYO > -25 & EYO < 15),  aes(x = EYO, y = log_plasma_nfl, group = cohort, colour = cohort, fill = cohort)) + 
+      geom_point(alpha =.3)+
+  theme_bw() + xlab("Estimated years to symptom onset")+ ylab(bquote(bold("log"[10](Plasma~NfL))))+
+  geom_smooth(data = plasma_base_forecast, aes(x = EYO, y = fit, group = cohort, colour = cohort), method = "gam") +
+  geom_ribbon(data = plasma_base_forecast, aes(x = EYO, y = fit, 
+                                                   ymin = lwrS, ymax = uprS, group = cohort, colour = cohort, fill = cohort), alpha = 0.2)  +
+  theme(axis.title = element_text(size = 35), 
+        axis.text = element_text(size = 25), legend.text = element_text(size = 25),
+legend.position = c(0.25,0.85))+ #may need to adjust location depending on where the data are
+  scale_fill_manual(name = "", labels = c("NC", "MC"), values = c( "grey33","#A50026")) + 
+  scale_colour_manual(name = "", labels = c("NC", "MC"), values = c( "grey33","#A50026"))
+
+
+# CX CSF NfL
+
+CSF_base_bmi$Mutation <- as.factor(CSF_base_bmi$Mutation)
+CSF_base_bmi$log_CSF_NFL <- log10(CSF_base_bmi$CSF_NFL)
+CSF_base_bmi$cohort <- as.factor(ifelse(CSF_base_bmi$Mutation == 0, "NC", "MC"))
+CSF_base_bmi$EYO <- CSF_base_bmi$dian_mutpar_eyo
+
+df <- CSF_base_bmi %>% dplyr::select("CSF_NFL", "cohort", "age_meancenter", "EYO" , "bmi_meancenter", "gender", "log_CSF_NFL")
+
+
+df_predict <- expand.grid("EYO" = seq(from = -25, to = 15, by = 1),
+                           "cohort" = unique(df$cohort), 
+                           "age_meancenter" = mean(df$age_meancenter), 
+                           "bmi_meancenter" =mean(df$bmi_meancenter),
+                           "gender" =.5)
+
+
+df <- within(df, cohort <- relevel(cohort, ref = "NC"))
+
+model_logcflnfl <- gam(log_CSF_NFL ~ s(age_meancenter)+ bmi_meancenter+ gender +s(EYO,cohort , bs = "fs"), data = df, method = "REML")
+
+
+rmvn <- function(n, mu, sig) { ## MVN random deviates
+  L <- mroot(sig)
+  m <- ncol(L)
+  t(mu + L %*% matrix(rnorm(m*n), m, n))
+}
+
+
+
+get_splineBasedCI <- function(Model, Forecast_DF){
+  Vb <- vcov(Model)
+  pred <- predict(Model, Forecast_DF, se.fit = TRUE)
+  se.fit <- pred$se.fit
+  set.seed(42)
+  N <- 10000
+  
+  BUdiff <- rmvn(N, mu = rep(0, nrow(Vb)), sig = Vb)
+  Cg <- predict(Model, Forecast_DF, type = "lpmatrix")
+  simDev <- Cg %*% t(BUdiff)
+  
+  absDev <- abs(sweep(simDev, 1, se.fit, FUN = "/"))
+  masd <- apply(absDev, 2L, max)
+  crit <- quantile(masd, prob = 0.95, type = 8)
+  
+  pred <- transform(cbind(data.frame(pred), Forecast_DF),
+                    uprP = fit + (2 * se.fit),
+                    lwrP = fit - (2 * se.fit),
+                    uprS = fit + (crit * se.fit),
+                    lwrS = fit - (crit * se.fit))
+  return(pred)
+}
+
+get_overlap_check <- function(cohort1_name, cohort2_name, forecast_df){
+  check_for_overlap <- cbind(forecast_df[forecast_df$cohort == cohort1_name, c("EYO", "fit", "lwrS", "uprS")],
+                             forecast_df[forecast_df$cohort == cohort2_name, c("fit", "lwrS", "uprS")])
+  colnames(check_for_overlap) <- c("EYO", "fit_c1", "lwrS_c1", "uprS_c1", "fit_c2", "lwrS_c2", "uprS_c2")
+  check_for_overlap$difference <- ifelse(check_for_overlap$lwrS_c1 > check_for_overlap$uprS_c2 | 
+                                           check_for_overlap$uprS_c1 < check_for_overlap$lwrS_c2, "Different", "No Difference")
+  colnames(check_for_overlap) <- c("EYO", paste0("fit_", cohort1_name), paste0("lwrS_", cohort1_name), paste0("uprS_", cohort1_name),
+                                   paste0("fit_", cohort2_name), paste0("lwrS_", cohort2_name), paste0("uprS_", cohort2_name),
+                                   "difference")
+  return(check_for_overlap)}
+
+
+
+
+
+get_difference_plot <- function(overlap_df_amyloid, light_color, plot_title, y_axis_title, YPOS = 0){
+  age_centiloids_changes <- max(overlap_df_amyloid[overlap_df_amyloid[,"difference"] == "No Difference", "EYO"]) + 1
+ 
+  
+  p <- ggplot(show.legend  = FALSE) +
+    geom_smooth(data = overlap_df_amyloid, aes(x = EYO, y = fit_diff, colour = light_color), show.legend  = FALSE) +
+    geom_ribbon(data = overlap_df_amyloid, aes(x = EYO,
+                                               ymin = lwr_diff,
+                                               ymax = upr_diff, fill = light_color), alpha = 0.2, show.legend  = FALSE) +
+xlab(bquote(bold("EYO")))+
+    scale_colour_manual(values = c(light_color), name = "", labels = c( "CSF NfL")) +
+    scale_fill_manual(values = c(light_color), name = "", labels = c("CSF NfL")) +
+    theme_bw() +
+    geom_vline(xintercept = age_centiloids_changes,
+               colour = light_color) +
+    
+    ylab(y_axis_title) +
+  theme(axis.title = element_text(size = 25), 
+        axis.text = element_text(size = 20), legend.text = element_text(size = 25))
+  
+  if(age_centiloids_changes == age_centiloids_changes){
+    p <- p + annotate('text', x = age_centiloids_changes - 1, y = YPOS, hjust = -.3,
+                      label = paste0("CSF NfL significantly differs at EYO = ", age_centiloids_changes),
+                      size = 5, angle = '90') 
+  }
+  
+  
+  return(p)
+  
+}
+csf_base_forecast <- get_splineBasedCI(model_logcflnfl, df_predict)
+overlap_MC_NC_CSF <- get_overlap_check("MC", "NC", csf_base_forecast)
+
+#calculating the differences between cases and controls
+overlap_MC_NC_CSF$fit_diff <- overlap_MC_NC_CSF$fit_MC - overlap_MC_NC_CSF$fit_NC
+overlap_MC_NC_CSF$lwr_diff <- overlap_MC_NC_CSF$lwrS_MC - overlap_MC_NC_CSF$uprS_NC
+overlap_MC_NC_CSF$upr_diff <- overlap_MC_NC_CSF$uprS_MC - overlap_MC_NC_CSF$lwrS_NC
+
+
+csf_nfl_plot <- ggplot(subset(df,EYO > - 25 & EYO < 15 ),  aes(x = EYO, y = log_CSF_NFL, group = cohort, colour = cohort, fill = cohort)) + 
+    geom_point(alpha = 0.3)+
+  theme_bw() + xlab("Estimated years to symptom onset") + ylab(bquote(bold("log"[10](CSF~NfL))))+
+  geom_smooth(data = csf_base_forecast, aes(x = EYO, y = fit, group = cohort, colour = cohort), method = "gam") +
+  geom_ribbon(data = csf_base_forecast, aes(x = EYO, y = fit, 
+                                                   ymin = lwrS, ymax = uprS, group = cohort, colour = cohort, fill = cohort), alpha = 0.2)  +
+  theme(axis.title = element_text(size = 35), 
+        axis.text = element_text(size = 25), legend.text = element_text(size = 25),
+legend.position = c(0.25,0.85))+ #may need to adjust location depending on where the data are
+  scale_fill_manual(name = "", labels = c("NC", "MC"), values = c(  "grey33","#A50026")) + 
+  scale_colour_manual(name = "", labels = c("NC", "MC"), values = c(  "grey33","#A50026"))
+
+
+# Long CSF NfL
+
+
+CSF_long <-CSF_all %>% group_by(imagid) %>%
+  filter(n() > 1)
+CSF_long$log_CSF_NFL <- log10(CSF_long$CSF_NFL)
+CSF_long$Mutation <- as.factor(CSF_long$Mutation)
+earliest_eyo <- aggregate(dian_mutpar_eyo~imagid, CSF_long, min)
+colnames(earliest_eyo) <- c("imagid", "earliest_eyo")
+CSF_long <- merge(CSF_long, earliest_eyo, by = "imagid")
+
+earliest_age <- aggregate(VISITAGEc~imagid, CSF_long, min)
+colnames(earliest_age) <- c("imagid", "earliest_age")
+CSF_long <- merge(CSF_long, earliest_age, by = "imagid")
+
+CSF_long$Mutation <- as.factor(CSF_long$Mutation)
+CSF_long$log_CSF_NFL <- log10(CSF_long$CSF_NFL)
+CSF_long$cohort <- as.factor(ifelse(CSF_long$Mutation == 0, "NC", "MC"))
+CSF_long$EYO <- CSF_long$dian_mutpar_eyo
+CSF_long$subject <- as.factor(CSF_long$imagid)
+
+CSF_long$earliest_age <- as.numeric(CSF_long$earliest_age)
+
+df_long <- CSF_long %>% dplyr::select("EYO", "subject", "cohort","log_CSF_NFL", "earliest_age", "gender" )
+df_long <- within(df_long, cohort <- relevel(cohort, ref = "NC"))
+
+
+df_predict <- expand.grid("EYO" = seq(from = -25, to = 15, by = 1),
+                           "cohort" = unique(df_long$cohort),
+                          "earliest_age" = mean(df_long$earliest_age),
+                          "gender" = .5)
+
+model_logcflnfl_long <- gam(log_CSF_NFL ~  s(cohort, bs = "fs") + s(earliest_age,EYO) + s(gender, EYO) +s(EYO,by =cohort , bs = "fs") + s(subject, bs ="re") ,data = df_long, method = 'REML')
+
+summary(model_logcflnfl_long)
+
+
+newd1 <- df_predict;newd1$subject <- NULL ## remove x0 from `newd1'
+#pred1 <- predict(model_logcflnfl_long,newd1,exclude = "s(subject)", newdata.guaranteed=TRUE)
+#df_long2 <- df_long[ , -which(names(df_long) == "imagid")]
+
+
+
+
+
+
+rmvn <- function(n, mu, sig) { ## MVN random deviates
+  L <- mroot(sig)
+  m <- ncol(L)
+  t(mu + L %*% matrix(rnorm(m*n), m, n))
+}
+
+
+
+get_splineBasedCI <- function(Model, Forecast_DF){
+  Vb <- vcov(Model)
+pred <-predict(Model, Forecast_DF, se.fit = TRUE, exclude = "s(subject)", newdata.guaranteed=TRUE )  
+se.fit <- pred$se.fit
+  set.seed(42)
+  N <- 10000
+  
+  BUdiff <- rmvn(N, mu = rep(0, nrow(Vb)), sig = Vb)
+  Cg <- predict(Model, Forecast_DF, type = "lpmatrix",exclude = "s(subject)",newdata.guaranteed=TRUE)
+  simDev <- Cg %*% t(BUdiff)
+  
+  absDev <- abs(sweep(simDev, 1, se.fit, FUN = "/"))
+  masd <- apply(absDev, 2L, max)
+  crit <- quantile(masd, prob = 0.95, type = 8)
+  
+  pred <- transform(cbind(data.frame(pred), Forecast_DF),
+                    uprP = fit + (2 * se.fit),
+                    lwrP = fit - (2 * se.fit),
+                    uprS = fit + (crit * se.fit),
+                    lwrS = fit - (crit * se.fit))
+  return(pred)
+}
+
+get_overlap_check <- function(cohort1_name, cohort2_name, forecast_df){
+  check_for_overlap <- cbind(forecast_df[forecast_df$cohort == cohort1_name, c("EYO", "fit", "lwrS", "uprS")],
+                             forecast_df[forecast_df$cohort == cohort2_name, c("fit", "lwrS", "uprS")])
+  colnames(check_for_overlap) <- c("EYO", "fit_c1", "lwrS_c1", "uprS_c1", "fit_c2", "lwrS_c2", "uprS_c2")
+  check_for_overlap$difference <- ifelse(check_for_overlap$lwrS_c1 > check_for_overlap$uprS_c2 | 
+                                           check_for_overlap$uprS_c1 < check_for_overlap$lwrS_c2, "Different", "No Difference")
+  colnames(check_for_overlap) <- c("EYO", paste0("fit_", cohort1_name), paste0("lwrS_", cohort1_name), paste0("uprS_", cohort1_name),
+                                   paste0("fit_", cohort2_name), paste0("lwrS_", cohort2_name), paste0("uprS_", cohort2_name),
+                                   "difference")
+  return(check_for_overlap)}
+
+
+
+
+
+get_difference_plot <- function(overlap_df_amyloid, light_color, plot_title, y_axis_title, YPOS = 0){
+  age_centiloids_changes <- max(overlap_df_amyloid[overlap_df_amyloid[,"difference"] == "No Difference", "EYO"]) + 1
+ 
+  
+  p <- ggplot(show.legend  = FALSE) +
+    geom_smooth(data = overlap_df_amyloid, aes(x = EYO, y = fit_diff, colour = light_color), show.legend  = FALSE) +
+    geom_ribbon(data = overlap_df_amyloid, aes(x = EYO,
+                                               ymin = lwr_diff,
+                                               ymax = upr_diff, fill = light_color), alpha = 0.2, show.legend  = FALSE) +
+xlab(bquote(bold("EYO")))+
+    scale_colour_manual(values = c(light_color), name = "", labels = c( "CSF NfL")) +
+    scale_fill_manual(values = c(light_color), name = "", labels = c("CSF NfL")) +
+    theme_bw() +
+    geom_vline(xintercept = age_centiloids_changes,
+               colour = light_color) +
+    
+    ylab(y_axis_title) +
+  theme(axis.title = element_text(size = 25), 
+        axis.text = element_text(size = 20), legend.text = element_text(size = 25))
+  
+  if(age_centiloids_changes == age_centiloids_changes){
+    p <- p + annotate('text', x = age_centiloids_changes - 1, y = YPOS, hjust = .1,
+                      label = paste0("Change CSF NfL significantly differs at EYO = ", age_centiloids_changes),size = 5, angle = '90') 
+  }
+  #label = paste0("Change in log10(Plasma NfL) significantly differs at EYO = ",
+  
+  return(p)
+  
+}
+
+csf_long_forecast <- get_splineBasedCI(model_logcflnfl_long, df_predict)
+
+overlap_MC_NC_CSF_long <- get_overlap_check("MC", "NC", csf_long_forecast)
+
+#calculating the differences between cases and controls
+overlap_MC_NC_CSF_long$fit_diff <- overlap_MC_NC_CSF_long$fit_MC - overlap_MC_NC_CSF_long$fit_NC
+overlap_MC_NC_CSF_long$lwr_diff <- overlap_MC_NC_CSF_long$lwrS_MC - overlap_MC_NC_CSF_long$uprS_NC
+overlap_MC_NC_CSF_long$upr_diff <- overlap_MC_NC_CSF_long$uprS_MC - overlap_MC_NC_CSF_long$lwrS_NC
+
+
+
+csf_nfl_plot_long <- ggplot(subset(df_long,EYO >25),  aes(x = EYO, y = log_CSF_NFL, group = cohort, colour = cohort, fill = cohort)) + 
+    geom_point(alpha = 0.5)+
+  geom_line(data=subset(df_long, EYO > -25 & EYO <10), size=1,alpha = 0.2, linetype=1, aes(x=EYO, y=log_CSF_NFL, group=subject,color = as.factor(cohort) ),show.legend=F) +
+  theme_bw() + xlab("Estimated years to symptom onset") + ylab(bquote(bold("log"[10](CSF~NfL))))+
+  geom_smooth(data = csf_long_forecast, aes(x = EYO, y = fit, group = cohort, colour = cohort), method = "gam") +
+  geom_ribbon(data = csf_long_forecast, aes(x = EYO, y = fit, 
+                                                   ymin = lwrS, ymax = uprS, group = cohort, colour = cohort, fill = cohort), alpha = 0.2)  +
+  theme(axis.title = element_text(size = 35), 
+        axis.text = element_text(size = 25), legend.text = element_text(size = 25),
+legend.position = c(0.25,0.85))+ #may need to adjust location depending on where the data are
+  scale_fill_manual(name = "", labels = c("NC", "MC"), values = c("grey33","#A50026")) + 
+  scale_colour_manual(name = "", labels = c("NC", "MC"), values = c("grey33","#A50026"))
+
+# Long plasma NfL
+
+plasma_all  <- plasma_all %>% filter(dian_mutpar_eyo > -100 )
+#CSF_all  <- CSF_all %>% filter(CSF_NfL.conc_pg_ml < 5000 )
+
+plasma_long <-plasma_all %>% group_by(imagid) %>%
+  filter(n() > 1)
+
+plasma_long$log_PLASMA_NFL <- log10(plasma_long$PLASMA_NFL)
+plasma_long$Mutation <- as.factor(plasma_long$Mutation)
+
+
+earliest_age <- aggregate(VISITAGEc~imagid, plasma_long, min)
+colnames(earliest_age) <- c("imagid", "earliest_age")
+plasma_long <- merge(plasma_long, earliest_age, by = "imagid")
+
+
+plasma_long$Mutation <- as.factor(plasma_long$Mutation)
+plasma_long$cohort <- as.factor(ifelse(plasma_long$Mutation == 0, "NC", "MC"))
+plasma_long$EYO <- plasma_long$dian_mutpar_eyo
+plasma_long$subject <- as.factor(plasma_long$imagid)
+plasma_long$earliest_age <- as.numeric(plasma_long$earliest_age)
+
+df_long <- plasma_long %>% dplyr::select("EYO", "subject", "cohort","log_PLASMA_NFL", "earliest_age", "gender" )
+
+df_long <- within(df_long, cohort <- relevel(cohort, ref = "NC"))
+
+
+df_predict <- expand.grid("EYO" = seq(from = -25, to = 15, by = 1),
+                           "cohort" = unique(df_long$cohort),
+                          "earliest_age" = mean(df_long$earliest_age),
+                          "gender" = .5)
+
+model_logplasmanfl_long <- gam(log_PLASMA_NFL ~  s(cohort, bs = "fs") + s(earliest_age,EYO) + s(gender, EYO) +s(EYO,by =cohort , bs = "fs") + s(subject ,bs ="re") ,data = df_long, method = 'REML')
+
+summary(model_logplasmanfl_long)
+
+#pred_b <- predict(model_logplasmanfl_long, df_predict, type = "lpmatrix",exclude = "s(subject)",newdata.guaranteed=TRUE)
+
+newd1 <- df_predict;newd1$subject <- NULL ## remove x0 from `newd1'
+#pred1 <- predict(model_logcflnfl_long,newd1,exclude = "s(subject)", newdata.guaranteed=TRUE)
+#df_long2 <- df_long[ , -which(names(df_long) == "imagid")]
+
+
+
+
+rmvn <- function(n, mu, sig) { ## MVN random deviates
+  L <- mroot(sig)
+  m <- ncol(L)
+  t(mu + L %*% matrix(rnorm(m*n), m, n))
+}
+
+
+
+get_splineBasedCI <- function(Model, Forecast_DF){
+  Vb <- vcov(Model)
+pred <-predict(Model, Forecast_DF, se.fit = TRUE, exclude = "s(subject)", newdata.guaranteed=TRUE )  
+se.fit <- pred$se.fit
+  set.seed(42)
+  N <- 10000
+  
+  BUdiff <- rmvn(N, mu = rep(0, nrow(Vb)), sig = Vb)
+  Cg <- predict(Model, Forecast_DF, type = "lpmatrix",exclude = "s(subject)",newdata.guaranteed=TRUE)
+  simDev <- Cg %*% t(BUdiff)
+  
+  absDev <- abs(sweep(simDev, 1, se.fit, FUN = "/"))
+  masd <- apply(absDev, 2L, max)
+  crit <- quantile(masd, prob = 0.95, type = 8)
+  
+  pred <- transform(cbind(data.frame(pred), Forecast_DF),
+                    uprP = fit + (2 * se.fit),
+                    lwrP = fit - (2 * se.fit),
+                    uprS = fit + (crit * se.fit),
+                    lwrS = fit - (crit * se.fit))
+  return(pred)
+}
+
+get_overlap_check <- function(cohort1_name, cohort2_name, forecast_df){
+  check_for_overlap <- cbind(forecast_df[forecast_df$cohort == cohort1_name, c("EYO", "fit", "lwrS", "uprS")],
+                             forecast_df[forecast_df$cohort == cohort2_name, c("fit", "lwrS", "uprS")])
+  colnames(check_for_overlap) <- c("EYO", "fit_c1", "lwrS_c1", "uprS_c1", "fit_c2", "lwrS_c2", "uprS_c2")
+  check_for_overlap$difference <- ifelse(check_for_overlap$lwrS_c1 > check_for_overlap$uprS_c2 | 
+                                           check_for_overlap$uprS_c1 < check_for_overlap$lwrS_c2, "Different", "No Difference")
+  colnames(check_for_overlap) <- c("EYO", paste0("fit_", cohort1_name), paste0("lwrS_", cohort1_name), paste0("uprS_", cohort1_name),
+                                   paste0("fit_", cohort2_name), paste0("lwrS_", cohort2_name), paste0("uprS_", cohort2_name),
+                                   "difference")
+  return(check_for_overlap)}
+
+
+
+
+
+get_difference_plot <- function(overlap_df_amyloid, light_color, plot_title, y_axis_title, YPOS = 0){
+  age_centiloids_changes <- max(overlap_df_amyloid[overlap_df_amyloid[,"difference"] == "No Difference", "EYO"]) + 1
+ 
+  
+  p <- ggplot(show.legend  = FALSE) +
+    geom_smooth(data = overlap_df_amyloid, aes(x = EYO, y = fit_diff, colour = light_color), show.legend  = FALSE) +
+    geom_ribbon(data = overlap_df_amyloid, aes(x = EYO,
+                                               ymin = lwr_diff,
+                                               ymax = upr_diff, fill = light_color), alpha = 0.2, show.legend  = FALSE) +
+xlab(bquote(bold("EYO")))+
+    scale_colour_manual(values = c(light_color), name = "", labels = c( "CSF NfL")) +
+    scale_fill_manual(values = c(light_color), name = "", labels = c("CSF NfL")) +
+    theme_bw() +
+    geom_vline(xintercept = age_centiloids_changes,
+               colour = light_color) +
+    
+    ylab(y_axis_title) +
+  theme(axis.title = element_text(size = 25), 
+        axis.text = element_text(size = 20), legend.text = element_text(size = 25))
+  
+  if(age_centiloids_changes == age_centiloids_changes){
+    p <- p + annotate('text', x = age_centiloids_changes - 1, y = YPOS, hjust = .1,
+                      label = paste0("Change Plasma NfL significantly differs at EYO = ", age_centiloids_changes),size = 5, angle = '90') 
+  }
+  #label = paste0("Change in log10(Plasma NfL) significantly differs at EYO = ",
+  
+  return(p)
+  
+}
+
+plasma_long_forecast <- get_splineBasedCI(model_logplasmanfl_long, df_predict)
+overlap_MC_NC_plasma_long <- get_overlap_check("MC", "NC", plasma_long_forecast)
+
+
+#calculating the differences between cases and controls
+overlap_MC_NC_plasma_long$fit_diff <- overlap_MC_NC_plasma_long$fit_MC - overlap_MC_NC_plasma_long$fit_NC
+overlap_MC_NC_plasma_long$lwr_diff <- overlap_MC_NC_plasma_long$lwrS_MC - overlap_MC_NC_plasma_long$uprS_NC
+overlap_MC_NC_plasma_long$upr_diff <- overlap_MC_NC_plasma_long$uprS_MC - overlap_MC_NC_plasma_long$lwrS_NC
+
+                            
+plasma_nfl_plot_long <- ggplot(subset(df_long,EYO >25),  aes(x = EYO, y = log_PLASMA_NFL, group = cohort, colour = cohort, fill = cohort)) + 
+    geom_point(alpha = 0.5)+
+  geom_line(data=subset(df_long, EYO > -25 & EYO <10), size=1,alpha = 0.2, linetype=1, aes(x=EYO, y=log_PLASMA_NFL, group=subject,color = as.factor(cohort) ),show.legend=F) +
+  theme_bw() + xlab("Estimated years to symptom onset") + ylab(bquote(bold("log"[10](plasama~NfL))))+
+  geom_smooth(data = plasma_long_forecast, aes(x = EYO, y = fit, group = cohort, colour = cohort), method = "gam") +
+  geom_ribbon(data = plasma_long_forecast, aes(x = EYO, y = fit, 
+                                                   ymin = lwrS, ymax = uprS, group = cohort, colour = cohort, fill = cohort), alpha = 0.2)  +
+  theme(axis.title = element_text(size = 35), 
+        axis.text = element_text(size = 25), legend.text = element_text(size = 25),
+legend.position = c(0.25,0.85))+ #may need to adjust location depending on where the data are
+  scale_fill_manual(name = "", labels = c("NC", "MC"), values = c("grey33","#A50026")) + 
+  scale_colour_manual(name = "", labels = c("NC", "MC"), values = c( "grey33","#A50026"))
+
+```
+
+```{r plotting figure s2}
+
+piecewise_Figure_S2_gam <- plot_grid(baseline_log_plasma_nfl_piecewise, baseline_log_CSF_nfl_piecewise, rate_log_plasma_nfl_piecewise, rate_log_csf_nfl_piecewise,plasma_nfl_plot,csf_nfl_plot,plasma_nfl_plot_long,csf_nfl_plot_long,nrow = 4, hjust=0, labels = "AUTO", label_size =35)
+
+dev.new()
+pdf("/Users/sws59/Dropbox (Partners HealthCare)/DIAN_Mathias_collab/NfL_paper/NC_submission/Rev_2/Figure_S2.pdf", width=25, height=38)
+piecewise_Figure_S2_gam
+```
+
+
+```{r Figure 3}
+
+## plasma NfL
+
+plasma_all_bmi <-filter(plasma_all, bmi >0)
+plasma_long <-plasma_all_bmi %>% group_by(imagid) %>%
+  filter(n() > 1)
+plasma_long$log_plasma_NfL.conc_pg_ml <- log10(plasma_long$PLASMA_NFL)
+mean_eyo <- aggregate(dian_mutpar_eyo~imagid, plasma_long, mean)
+colnames(mean_eyo) <- c("imagid", "mean_eyo")
+earliest_eyo <- aggregate(dian_mutpar_eyo~imagid, plasma_long, min)
+colnames(earliest_eyo) <- c("imagid", "earliest_eyo")
+plasma_long <- merge(plasma_long, earliest_eyo, by = "imagid")
+plasma_long <- merge(plasma_long, mean_eyo, by = "imagid")
+
+
+#create a time variable where zero equals baseline
+plasma_long$time_wrt_base <- plasma_long$dian_mutpar_eyo - plasma_long$earliest_eyo 
+
+
+log_plasma_NfL.conc_pg_ml_slope <-(lmer(log_plasma_NfL.conc_pg_ml  ~ 1 + time_wrt_base + (time_wrt_base|imagid), plasma_long))
+beta <- coef(log_plasma_NfL.conc_pg_ml_slope)$imagid
+extracted1 <- tibble::rownames_to_column(beta, "imagid") # Apply rownames_to_column
+extracted1
+log_plasma_long_rate<- merge(extracted1, plasma_long, by = "imagid")
+log_plasma_long_rate$log_plasma_nfL_rate <-log_plasma_long_rate$time_wrt_base.x
+summary(log_plasma_long_rate$log_plasma_nfL_rate)
+
+baseline <- aggregate(visit~imagid, log_plasma_long_rate, FUN = "min")
+log_plasma_long_rate_min <- merge(log_plasma_long_rate, baseline, by = c( "visit", "imagid"))
+rm(baseline)
+log_plasma_long_rate_min$log_plasma_nfL_rate <- as.numeric(log_plasma_long_rate_min$log_plasma_nfL_rate)
+
+log_plasma_long_rate_min$Group_no_12 <- as.factor(log_plasma_long_rate_min$Group_no_12)
+log_plasma_long_rate_min$Group_no_12_conv_grp_sym <- as.factor(log_plasma_long_rate_min$Group_no_12_conv_grp_sym)
+log_plasma_long_rate_min_sens <- subset(log_plasma_long_rate_min, Group_no_13 != "3")
+log_plasma_long_rate_min_sens$Group_no_12 <- as.factor(log_plasma_long_rate_min_sens$Group_no_12)
+
+
+
+print(log_plasma_long_rate_min_cdr_sens <- log_plasma_long_rate_min_sens %>%
+        ggplot(aes(Group_no_12,log_plasma_nfL_rate, fill=Group_no_12), show.legend=F) +
+                geom_violin (alpha =0.5, show.legend=F) +
+        geom_boxplot(outlier.shape=NA, width=.4, alpha=.6, show.legend=F) +
+        geom_point(size=3,aes(fill=Group_no_12,group=Group_no_12, color=Group_no_12), position = position_jitter(w = .1, h = 0), show.legend=F) +
+        scale_fill_manual(values = c(   "grey33","gold", "orange","darkred"), labels=labels)+
+        scale_color_manual(values = c( "grey33","gold", "orange","darkred" ), labels=labels)+
+        scale_x_discrete(labels=c('NC', 'PreSym MC', 'Converters', 'Sym MC'))+
+        labs( y=bquote(bold(paste( Delta, ~log[10](Plasma~NfL)))), x=labels, fill = "Group_no_12", point ="Group_no_12" )+
+   theme(panel.border = element_blank(), axis.line = element_line())
+ +
+   theme(panel.background = element_rect(fill = "white"))+        theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size =35, face="bold")) + 
+        theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size =35, face="bold")) +
+        theme(legend.title = element_text(size=15, family="Helvetica", face="bold"))+  
+        theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent"))+  
+        theme(legend.text = element_text(size=15, family="Helvetica", face="bold"))+
+        theme(axis.text.y = element_text(size = 25, face="bold"), axis.title.x=element_blank()) +
+        theme(axis.text.x = element_text(size = 25, face="bold"), axis.title.x=element_blank()) )
+
+
+
+
+summary(lm(log_plasma_nfL_rate~bmi+visitage+gender+Group_no_12, log_plasma_long_rate_min_sens))
+
+Group_no_12_relevel_pre <- relevel (log_plasma_long_rate_min_sens$Group_no_12, ref = "0")
+summary(lm(log_plasma_nfL_rate~bmi+visitage+gender +Group_no_12_relevel_pre, log_plasma_long_rate_min_sens))
+
+Group_no_12_relevel_conv <- relevel (log_plasma_long_rate_min_sens$Group_no_12, ref = "1")
+summary(lm(log_plasma_nfL_rate~bmi+visitage+gender+Group_no_12_relevel_conv, log_plasma_long_rate_min_sens))
+
+
+
+aov3_cov <- aov(log_plasma_nfL_rate~visitage + bmi + gender+Group_no_12, log_plasma_long_rate_min_sens)
+aov3_mc <- glht(aov3_cov, linfct = mcp(Group_no_12 = 'Tukey'))
+print(summary(aov3_mc))
+plot(aov3_mc)
+aov3_mc_s <- summary(aov3_mc)
+
+p <- as.data.frame(aov3_mc_s$test$pvalues)
+
+# Linear Hypotheses:
+#             Estimate Std. Error t value Pr(>|t|)    
+# 0 - -1 == 0 0.004383   0.001647   2.662   0.0375 *  
+# 1 - -1 == 0 0.016744   0.003196   5.239   <0.001 ***
+# 2 - -1 == 0 0.019882   0.002002   9.929   <0.001 ***
+# 1 - 0 == 0  0.012360   0.003263   3.788   0.0010 ** 
+# 2 - 0 == 0  0.015498   0.002151   7.205   <0.001 ***
+# 2 - 1 == 0  0.003138   0.003327   0.943   0.7722 
+
+CSF_all  <- CSF_all %>% filter(dian_mutpar_eyo > -100 )
+#CSF_all  <- CSF_all %>% filter(CSF_NfL.conc_pg_ml < 5000 )
+CSF_long <-CSF_all %>% group_by(imagid) %>%
+  filter(n() > 1)
+CSF_long$log_CSF_NFL <- log10(CSF_long$CSF_NFL)
+CSF_long$Mutation <- as.factor(CSF_long$Mutation)
+
+
+
+Formatting_Scatter = 
+  # theme(axis.title = element_text(family = "Helvetica", color="#666666", face="bold", size=30)) + 
+   theme(panel.border = element_blank(), axis.line = element_line())+
+   theme(panel.background = element_rect(fill = "white"))+  
+  theme(axis.text = element_text(size = 20), axis.title.x=element_blank()) +
+  theme(legend.title=element_blank()) +
+  theme(legend.text=element_text(size=15, family="Helvetica")) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size = 20, face="bold")) + 
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size = 20, face="bold")) +
+  theme(legend.position = "" )+
+  theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent")) 
+
+ 
+####spaghetti plot
+Point = geom_point(size=2,aes(color=Mutation, shape=Mutation),show.legend=F) 
+cPlot=ggplot(CSF_long, aes(x=dian_mutpar_eyo, y=log_CSF_NFL, group=imagid, col=Mutation))
+Shape_Labels= scale_shape_discrete(labels=c('NC', 'MC'),solid=TRUE) 
+cfill = scale_fill_manual(values=c( 'grey33', '#A50026'), labels=c( 'NC', 'MC'))
+Color=scale_color_manual(values=c( 'grey33', '#A50026'), labels=c( 'NC', 'MC')) 
+line= geom_line(data=CSF_long, size=1, linetype=1, aes(x=dian_mutpar_eyo, y=log_CSF_NFL, group=imagid ),show.legend=F) 
+Labels=labs(x = "EYO", y = bquote(bold(paste( Delta, ~log[10](CSF~NfL))))) #, title="testing") #Add in X and Y axis labels
+cx= scale_x_continuous(breaks = c( 0), labels = c( "0"))
+spaghetti_csf_nfl_log=cPlot + line+ Point +  Labels + Formatting_Scatter + cfill + Color + Shape_Labels+cx
+print(spaghetti_csf_nfl_log)
+
+
+earliest_eyo <- aggregate(dian_mutpar_eyo~imagid, CSF_long, min)
+colnames(earliest_eyo) <- c("imagid", "earliest_eyo")
+CSF_long <- merge(CSF_long, earliest_eyo, by = "imagid")
+mean_eyo <- aggregate(dian_mutpar_eyo~imagid, CSF_long, mean)
+colnames(mean_eyo) <- c("imagid", "mean_eyo")
+CSF_long <- merge(CSF_long, mean_eyo, by = "imagid")
+#create a time variable where zero equals baseline
+CSF_long$time_wrt_base <- CSF_long$dian_mutpar_eyo - CSF_long$earliest_eyo 
+
+
+
+log_CSF_NfL.conc_pg_ml_slope <-(lmer(log_CSF_NFL  ~ 1 + time_wrt_base + (time_wrt_base|imagid), CSF_long))
+beta <- coef(log_CSF_NfL.conc_pg_ml_slope)$imagid
+extracted1 <- tibble::rownames_to_column(beta, "imagid") # Apply rownames_to_column
+extracted1
+log_CSF_long_rate<- merge(extracted1, CSF_long, by = "imagid")
+log_CSF_long_rate$log_csf_nfL_rate <-log_CSF_long_rate$time_wrt_base.x
+summary(log_CSF_long_rate$log_csf_nfL_rate)
+baseline <- aggregate(visit~imagid, log_CSF_long_rate, FUN = "min")
+log_CSF_long_rate_min <- merge(log_CSF_long_rate, baseline, by = c( "visit", "imagid"))
+rm(baseline)
+
+
+log_CSF_long_rate_min$Group_no_12 <- as.factor(log_CSF_long_rate_min$Group_no_12)
+log_CSF_long_rate_min_sens <- subset(log_CSF_long_rate_min, Group_no_13 != "3")
+log_CSF_long_rate_min_sens$Group_no_13
+
+
+summary(lm(log_csf_nfL_rate~bmi+visitage+gender+Group_no_12, log_CSF_long_rate_min_sens))
+
+Group_no_12_relevel_pre <- relevel (log_CSF_long_rate_min_sens$Group_no_12, ref = "0")
+summary(lm(log_csf_nfL_rate~bmi+visitage+gender +Group_no_12_relevel_pre, log_CSF_long_rate_min_sens))
+
+Group_no_12_relevel_conv <- relevel (log_CSF_long_rate_min_sens$Group_no_12, ref = "1")
+summary(lm(log_csf_nfL_rate~bmi+visitage+gender+Group_no_12_relevel_conv, log_CSF_long_rate_min_sens))
+
+
+
+
+log_CSF_long_rate_min_sens <- subset(log_CSF_long_rate_min, Group_no_13 != "3")
+
+
+print(log_CSF_long_rate_min_cdr_sens <- log_CSF_long_rate_min_sens %>%
+        ggplot(aes(Group_no_12,log_csf_nfL_rate, fill=Group_no_12), show.legend=F) +
+                        geom_violin(alpha = 0.5,show.legend=F) +
+        geom_boxplot(outlier.shape=NA, width=.4, alpha=.6, show.legend=F) +
+        geom_point(size=3,aes(fill=Group_no_12,group=Group_no_12, color=Group_no_12), position = position_jitter(w = .1, h = 0), show.legend=F) +
+        scale_fill_manual(values = c(   "grey33","gold", "orange","darkred"), labels=labels)+
+        scale_color_manual(values = c( "grey33","gold", "orange","darkred" ), labels=labels)+
+        scale_x_discrete(labels=c('NC', 'PreSym MC', 'Converters', 'Sym MC'))+
+        labs( y = bquote(bold(paste( Delta, ~log[10](CSF~NfL)))), x=labels, fill = "Group_no_12", point ="Group_no_12" )+
+   theme(panel.border = element_blank(), axis.line = element_line())+
+   theme(panel.background = element_rect(fill = "white"))+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size =35, face="bold")) + 
+        theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size =35, face="bold")) +
+        theme(legend.title = element_text(size=15, family="Helvetica", face="bold"))+  
+        theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent"))+  
+        theme(legend.text = element_text(size=15, family="Helvetica", face="bold"))+
+        theme(axis.text.y = element_text(size = 25, face="bold"), axis.title.x=element_blank()) +
+        theme(axis.text.x = element_text(size = 25, face="bold"), axis.title.x=element_blank()) )
+
+anova(lm(log_csf_nfL_rate~Group_no_12, log_CSF_long_rate_min_sens))
+
+
+summary(lm(log_csf_nfL_rate~bmi+visitage+gender+Group_no_12, log_CSF_long_rate_min_sens))
+
+Group_no_12_relevel_pre <- relevel (log_CSF_long_rate_min_sens$Group_no_12, ref = "0")
+summary(lm(log_csf_nfL_rate~bmi+visitage+gender +Group_no_12_relevel_pre, log_CSF_long_rate_min_sens))
+
+Group_no_12_relevel_conv <- relevel (log_CSF_long_rate_min_sens$Group_no_12, ref = "1")
+summary(lm(log_csf_nfL_rate~bmi+visitage+gender+Group_no_12_relevel_conv, log_CSF_long_rate_min_sens))
+
+
+
+aov3_cov <- aov(log_csf_nfL_rate~visitage + bmi + gender+Group_no_12, log_CSF_long_rate_min_sens)
+aov3_mc <- glht(aov3_cov, linfct = mcp(Group_no_12 = 'Tukey'))
+print(summary(aov3_mc))
+plot(aov3_mc)
+# 
+#  Linear Hypotheses:
+#             Estimate Std. Error t value Pr(>|t|)    
+# 0 - -1 == 0 0.002469   0.001076   2.294  0.09616 .  
+# 1 - -1 == 0 0.011969   0.002046   5.849  < 0.001 ***
+# 2 - -1 == 0 0.018986   0.001354  14.020  < 0.001 ***
+# 1 - 0 == 0  0.009500   0.002088   4.550  < 0.001 ***
+# 2 - 0 == 0  0.016518   0.001419  11.638  < 0.001 ***
+# 2 - 1 == 0  0.007017   0.002137   3.283  0.00613 ** 
+
+
+
+
+# CSF/plasma ratio
+CSF_plasma_base_sens <- subset(CSF_plasma_base, Group_no_13 != "3")
+CSF_plasma_base_sens$Group_no_12 <- factor(CSF_plasma_base_sens$Group_no_12, labels = c("NC", "aMC", "Conv", "sMC"))
+CSF_plasma_base_sens$Group_no_12 <- as.factor(CSF_plasma_base_sens$Group_no_12)
+
+anova(lm(plasma_CSF_ratio~Group_no_12, CSF_plasma_base_sens))
+
+library(multcomp)
+aov3_cov <- aov(plasma_CSF_ratio~visitage + bmi + gender+Group_no_12, CSF_plasma_base_sens)
+aov3_mc <- glht(aov3_cov, linfct = mcp(Group_no_12 = 'Tukey'))
+print(summary(aov3_mc))
+plot(aov3_mc)
+
+aov3 <- aov(plasma_CSF_ratio~Group_no_12, CSF_plasma_base_sens)
+aov3_mc <- glht(aov3, linfct = mcp(Group_no_12 = 'Tukey'))
+print(summary(aov3_mc))
+plot(aov3_mc)
+
+aov3_mc_s <- summary(aov3_mc)
+p <- as.data.frame(aov3_mc_s$test$pvalues)
+
+
+print(log_plasma_csf_ratio_cdr <- CSF_plasma_base_sens %>%
+        ggplot(aes(Group_no_12,plasma_CSF_ratio, fill=Group_no_12), show.legend=F) +        geom_violin(alpha =0.5, show.legend=F)+
+
+        geom_point(size=3,aes(fill=Group_no_12,group=Group_no_12, color=Group_no_12), position = position_jitter(w = .1, h = 0), show.legend=F) +
+        geom_boxplot(outlier.shape=NA, width=.4, alpha=.6, show.legend=F) +
+        scale_fill_manual(values = c(   "grey33","gold", "orange","darkred"), labels=labels)+
+        scale_color_manual(values = c( "grey33","gold", "orange","darkred" ), labels=labels)+
+        scale_x_discrete(labels=c('NC', 'PreSym MC', 'Converters', 'Sym MC'))+
+        labs( y="  Plasma/CSF NfL", x=labels, fill = "Group_no_12", point ="Group_no_12" )+
+   theme(panel.border = element_blank(), axis.line = element_line())+
+   theme(panel.background = element_rect(fill = "white"))+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size =35, face="bold")) + 
+        theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size =35, face="bold")) +
+        theme(legend.title = element_text(size=15, family="Helvetica", face="bold"))+  
+        theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent"))+  
+        theme(legend.text = element_text(size=15, family="Helvetica", face="bold"))+
+        theme(axis.text.y = element_text(size = 25, face="bold"), axis.title.x=element_blank()) +
+        theme(axis.text.x = element_text(size = 25, face="bold"), axis.title.x=element_blank()) )
+
+
+```
+
+```{r plotting figure 3}
+long_rate_min_cdr <- plot_grid(log_plasma_long_rate_min_cdr_sens, log_CSF_long_rate_min_cdr_sens,log_plasma_csf_ratio_cdr,  labels="AUTO" ,nrow = 1,  label_size=35, hjust=0)
+                               dev.new()
+                              pdf("/Users/sws59/Dropbox (Partners HealthCare)/DIAN_Mathias_collab/NfL_paper/NC_submission/Rev_2/Figures_tables/Figure_3.pdf", width=30, height=7)
+                               long_rate_min_cdr
+                              dev.off()
+```
+
+
+```{r Figure 4a}
+
+#### precuneus volume
+plasma_all  <- data %>% filter(PLASMA_NFL > -1 )
+plasma_all  <- plasma_all %>% filter(dian_mutpar_eyo > -100 )
+plasma_all_bmi <-filter(plasma_all, bmi >0)
+
+plasma_all_bmi$MR_PRECUNEUS_avg <- .5*(plasma_all_bmi$MR_LV_PRECUNEUS + plasma_all_bmi$MR_RV_PRECUNEUS)
+
+plasma_all_bmi$adj_precuneus_vol <- resid(lm(plasma_all_bmi$MR_PRECUNEUS_avg ~ plasma_all_bmi$MR_TOTV_INTRACRANIAL, na.action = na.exclude)) + mean(plasma_all_bmi$MR_PRECUNEUS_avg, na.rm = TRUE)
+plasma_all_bmi_pcv <-filter(plasma_all_bmi, adj_precuneus_vol > 0)
+plasma_all_bmi_pcv_long <-plasma_all_bmi_pcv %>% group_by(imagid) %>%
+  filter(n() > 1)
+plasma_all_bmi_pcv_long$log_plasma_NFL <- log10(plasma_all_bmi_pcv_long$PLASMA_NFL)
+earliest_age <- aggregate(visitage~imagid, plasma_all_bmi_pcv_long, min)
+colnames(earliest_age) <- c("imagid", "earliest_age")
+earliest_eyo <- aggregate(dian_mutpar_eyo~imagid, plasma_all_bmi_pcv_long, min)
+colnames(earliest_eyo) <- c("imagid", "earliest_eyo")
+earliest_bmi <- aggregate(bmi~imagid, plasma_all_bmi_pcv_long, min)
+colnames(earliest_bmi) <- c("imagid", "earliest_bmi")
+plasma_all_bmi_pcv_long <- merge(plasma_all_bmi_pcv_long, latest_eyo, by = "imagid")
+plasma_all_bmi_pcv_long <- merge(plasma_all_bmi_pcv_long, earliest_age, by = "imagid")
+plasma_all_bmi_pcv_long <- merge(plasma_all_bmi_pcv_long, earliest_eyo, by = "imagid")
+plasma_all_bmi_pcv_long <- merge(plasma_all_bmi_pcv_long, earliest_bmi, by = "imagid")
+
+
+#create a time variable where zero equals baseline
+plasma_all_bmi_pcv_long$time_wrt_base <- plasma_all_bmi_pcv_long$dian_mutpar_eyo - plasma_all_bmi_pcv_long$earliest_eyo 
+
+log_plasma_nflslope <-(lmer(log_plasma_NFL  ~ 1 + time_wrt_base + (time_wrt_base|imagid), plasma_all_bmi_pcv_long))
+beta <- coef(log_plasma_nflslope)$imagid
+extracted1 <- tibble::rownames_to_column(beta, "imagid") # Apply rownames_to_column
+extracted1
+log_plasma_long_rate<- merge(extracted1, plasma_all_bmi_pcv_long, by = "imagid")
+log_plasma_long_rate$log_plasma_nfL_rate <-log_plasma_long_rate$time_wrt_base.x
+summary(log_plasma_long_rate$log_plasma_nfL_rate)
+
+
+summary(lmer(adj_precuneus_vol~log_plasma_nfL_rate*time_wrt_base.y  + earliest_bmi*time_wrt_base.y + earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_plasma_long_rate))
+
+
+log_plasma_long_rate$Group_no_12_conv_grp_sym <- factor(log_plasma_long_rate$Group_no_12_conv_grp_sym, labels = c("NC", "aMC", "sMC"))
+
+log_plasma_long_rate_nc <- log_plasma_long_rate %>% filter(Group_no_12_conv_grp_sym == "NC")
+summary(lmer(adj_precuneus_vol~log_plasma_nfL_rate*time_wrt_base.y + earliest_bmi*time_wrt_base.y + earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_plasma_long_rate_nc))
+
+log_plasma_long_rate_amc <- log_plasma_long_rate %>% filter(Group_no_12_conv_grp_sym == "aMC")
+summary(lmer(adj_precuneus_vol~log_plasma_nfL_rate*time_wrt_base.y + earliest_bmi*time_wrt_base.y + earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_plasma_long_rate_amc))
+
+log_plasma_long_rate_smc <- log_plasma_long_rate %>% filter(Group_no_12_conv_grp_sym == "sMC")
+summary(lmer(adj_precuneus_vol~log_plasma_nfL_rate*time_wrt_base.y+ earliest_bmi*time_wrt_base.y  + earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_plasma_long_rate_smc))
+
+# 
+
+baseline <- aggregate(visit~imagid, log_plasma_long_rate, FUN = "min")
+log_plasma_long_rate_min <- merge(log_plasma_long_rate, baseline, by = c( "visit", "imagid"))
+rm(baseline)
+
+
+log_plasma_long_rate_min$log_plasma_nfL_rate <- as.numeric(log_plasma_long_rate_min$log_plasma_nfL_rate)
+
+
+adj_precuneus_vol_slope <-(lmer(adj_precuneus_vol  ~ 1 + time_wrt_base + (time_wrt_base|imagid), plasma_all_bmi_pcv_long))
+
+beta <- coef(adj_precuneus_vol_slope)$imagid
+extracted1 <- tibble::rownames_to_column(beta, "imagid") # Apply rownames_to_column
+
+adj_precuneus_vol_long_rate<- merge(extracted1, plasma_all_bmi_pcv_long, by = "imagid")
+adj_precuneus_vol_long_rate$adj_precuneus_vol_rate <-adj_precuneus_vol_long_rate$time_wrt_base.x
+summary(adj_precuneus_vol_long_rate$adj_precuneus_vol_rate)
+
+baseline <- aggregate(visit~imagid, adj_precuneus_vol_long_rate, FUN = "min")
+adj_precuneus_vol_long <- merge(adj_precuneus_vol_long_rate, baseline, by = c( "visit", "imagid"))
+rm(baseline)
+#plasma_long_rate_min_outlier  <- log_plasma_long_rate_min %>% filter(plasma_nfL_rate > -1 )
+
+adj_precuneus_vol_long_rate_min2 <- as.data.frame(cbind(adj_precuneus_vol_long$adj_precuneus_vol_rate, adj_precuneus_vol_long$imagid))
+colnames(adj_precuneus_vol_long_rate_min2) <- c("adj_precuneus_vol_rate", "imagid")
+adj_precuneus_vol_long_rate_min2$adj_precuneus_vol_rate <- as.numeric(adj_precuneus_vol_long_rate_min2$adj_precuneus_vol_rate)
+adj_precuneus_vol_long_rate_min2$imagid <- as.factor(adj_precuneus_vol_long_rate_min2$imagid)
+adj_precuneus_vol_long_rate_min <- merge(adj_precuneus_vol_long_rate_min2, log_plasma_long_rate_min, by = c( "imagid"))
+
+adj_precuneus_vol_long_rate_min$log_plasma_nfL_rate
+
+adj_precuneus_vol_long_rate_min$Group_no_12_conv_grp_sym <- as.factor(adj_precuneus_vol_long_rate_min$Group_no_12_conv_grp_sym)
+adj_precuneus_vol_long_rate_min$Group_no_12 <- as.factor(adj_precuneus_vol_long_rate_min$Group_no_12)
+
+print(precuneus_log_plasma_long_rate_min_plot <-adj_precuneus_vol_long_rate_min %>%
+        ggplot( aes(x=log_plasma_nfL_rate, y=adj_precuneus_vol_rate, group=Group_no_12_conv_grp_sym)) +
+        geom_smooth ( method = "lm", size = 3,se=TRUE, aes(fill=Group_no_12_conv_grp_sym, color=Group_no_12_conv_grp_sym, linetype = Group_no_12_conv_grp_sym),show.legend=F)+ 
+        #labs(x="log plasma NfL rate of change", y="Hippocampal Volume rate of change", fill="Grouping", color= "Grouping")+
+        labs(x=bquote(bold(paste( Delta, ~log[10](Plasma~NfL)))), y= bquote(bold(paste( Delta,~Precuneus~Volume))), color= "Grouping")+
+        #labs(x = bquote(bold(paste( Delta, ~log[10](plasma~NfL)))), y = bquote(bold(paste( Delta, ~Hippocampal Volume)))) +
+        scale_fill_manual(values = c( "grey33", "gold","darkred"), labels = c('Non-Carriers', 'PreSymptomatic Carriers', 'Symptomatic Carriers'))+
+        scale_color_manual(values = c( "grey33", "gold","darkred" ), labels = c('Non-Carriers', 'PreSymptomatic Carriers', 'Symptomatic Carriers'))+
+          scale_shape_manual(values = c( 15,16,17 ), labels = c('Non-Carriers', 'PreSymptomatic Carriers', 'Symptomatic Carriers'))+
+                 scale_linetype_manual(values=c("dashed", "dashed", "solid"))+
+        geom_point(size=5,aes(fill=Group_no_12_conv_grp_sym, color=Group_no_12_conv_grp_sym, shape=Group_no_12_conv_grp_sym),show.legend=F, alpha =0.5) +
+        theme_bw() +
+        theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size =35, face="bold")) + 
+        theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size =35, face="bold")) +
+        theme(legend.title = element_text(size=15, family="Helvetica", face="bold"))+  
+        theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent"))+  
+        theme(legend.text = element_text(size=15, family="Helvetica", face="bold"))+
+        theme(axis.text.y = element_text(size = 25, face="bold")) +
+        theme(axis.text.x = element_text(size = 25, face="bold")) +
+theme(legend.position = c(0.4,.2))+ 
+        theme(plot.margin = margin(2, 1, 1, 1, "cm")))
+
+
+
+```
+
+
+```{r Figure 4B}
+#### precuneus volume
+CSF_all_bmi$MR_PRECUNEUS_avg <- .5*(CSF_all_bmi$MR_LV_PRECUNEUS + CSF_all_bmi$MR_RV_PRECUNEUS)
+CSF_all_bmi$adj_precuneus_vol <- resid(lm(CSF_all_bmi$MR_PRECUNEUS_avg ~ CSF_all_bmi$MR_TOTV_INTRACRANIAL, na.action = na.exclude)) + mean(CSF_all_bmi$MR_PRECUNEUS_avg, na.rm = TRUE)
+CSF_all_bmi_pcv <-filter(CSF_all_bmi, adj_precuneus_vol > 0)
+CSF_all_bmi_pcv_long <-CSF_all_bmi_pcv %>% group_by(imagid) %>%
+  filter(n() > 1)
+
+CSF_all_bmi_pcv_long$log_CSF_NFL <- log10(CSF_all_bmi_pcv_long$CSF_NFL)
+earliest_age <- aggregate(dian_mutpar_eyo~imagid, CSF_all_bmi_pcv_long, mean)
+colnames(earliest_age) <- c("imagid", "earliest_age")
+earliest_eyo <- aggregate(dian_mutpar_eyo~imagid, CSF_all_bmi_pcv_long, min)
+colnames(earliest_eyo) <- c("imagid", "earliest_eyo")
+earliest_bmi <- aggregate(bmi~imagid, CSF_all_bmi_pcv_long, min)
+colnames(earliest_bmi) <- c("imagid", "earliest_bmi")
+CSF_all_bmi_pcv_long <- merge(CSF_all_bmi_pcv_long, earliest_age, by = "imagid")
+CSF_all_bmi_pcv_long <- merge(CSF_all_bmi_pcv_long, earliest_eyo, by = "imagid")
+CSF_all_bmi_pcv_long <- merge(CSF_all_bmi_pcv_long, earliest_bmi, by = "imagid")
+CSF_all_bmi_pcv_long$Mutation <- as.factor(CSF_all_bmi_pcv_long$Mutation)
+
+#create a time variable where zero equals baseline
+CSF_all_bmi_pcv_long$time_wrt_base <- CSF_all_bmi_pcv_long$dian_mutpar_eyo - CSF_all_bmi_pcv_long$earliest_eyo 
+log_csf_nflslope <-(lmer(log_CSF_NFL  ~ 1 + time_wrt_base + (time_wrt_base|imagid), CSF_all_bmi_pcv_long))
+beta <- coef(log_csf_nflslope)$imagid
+extracted1 <- tibble::rownames_to_column(beta, "imagid") # Apply rownames_to_column
+extracted1
+log_csf_long_rate<- merge(extracted1, CSF_all_bmi_pcv_long, by = "imagid")
+log_csf_long_rate$log_csf_nfL_rate <-log_csf_long_rate$time_wrt_base.x
+summary(log_csf_long_rate$log_csf_nfL_rate)
+summary(lmer(adj_precuneus_vol~log_csf_nfL_rate*time_wrt_base.y  + earliest_bmi*time_wrt_base.y + earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_csf_long_rate))
+
+log_csf_long_rate$Group_no_12 <- as.factor(log_csf_long_rate$Group_no_12)
+
+log_csf_long_rate$Group_no_12_conv_grp_sym <- factor(log_csf_long_rate$Group_no_12_conv_grp_sym, labels = c("NC", "aMC", "sMC"))
+
+log_csf_long_rate_nc <- log_csf_long_rate %>% filter(Group_no_12_conv_grp_sym == "NC")
+summary(lmer(adj_precuneus_vol~log_csf_nfL_rate*time_wrt_base.y  + earliest_bmi*time_wrt_base.y +earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_csf_long_rate_nc))
+
+log_csf_long_rate_amc <- log_csf_long_rate %>% filter(Group_no_12_conv_grp_sym == "aMC")
+summary(lmer(adj_precuneus_vol~log_csf_nfL_rate*time_wrt_base.y  + earliest_bmi*time_wrt_base.y + earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_csf_long_rate_amc))
+
+log_csf_long_rate_smc <- log_csf_long_rate %>% filter(Group_no_12_conv_grp_sym == "sMC")
+summary(lmer(adj_precuneus_vol~log_csf_nfL_rate*time_wrt_base.y  + earliest_bmi*time_wrt_base.y+ earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_csf_long_rate_smc))
+
+# 
+# 
+# baseline <- aggregate(visit~imagid, log_csf_long_rate, FUN = "min")
+# log_csf_long_rate_min <- merge(log_csf_long_rate, baseline, by = c( "visit", "imagid"))
+# rm(baseline)
+# log_csf_long_rate_min$log_csf_nfL_rate <- as.numeric(log_csf_long_rate_min$log_csf_nfL_rate)
+# 
+# adj_precuneus_vol_slope <-(lmer(adj_precuneus_vol  ~ 1 + time_wrt_base + (time_wrt_base|imagid), CSF_all_bmi_pcv_long))
+# beta <- coef(adj_precuneus_vol_slope)$imagid
+# extracted1 <- tibble::rownames_to_column(beta, "imagid") # Apply rownames_to_column
+# adj_precuneus_vol_long_rate<- merge(extracted1, CSF_all_bmi_pcv_long, by = "imagid")
+# adj_precuneus_vol_long_rate$adj_precuneus_vol_rate <-adj_precuneus_vol_long_rate$time_wrt_base.x
+# summary(adj_precuneus_vol_long_rate$adj_precuneus_vol_rate)
+# baseline <- aggregate(visit~imagid, adj_precuneus_vol_long_rate, FUN = "min")
+# adj_precuneus_vol_long <- merge(adj_precuneus_vol_long_rate, baseline, by = c( "visit", "imagid"))
+# rm(baseline)
+# #plasma_long_rate_min_outlier  <- log_plasma_long_rate_min %>% filter(plasma_nfL_rate > -1 )
+# 
+# adj_precuneus_vol_long_rate_min2 <- as.data.frame(cbind(adj_precuneus_vol_long$adj_precuneus_vol_rate, adj_precuneus_vol_long$imagid))
+# colnames(adj_precuneus_vol_long_rate_min2) <- c("adj_precuneus_vol_rate", "imagid")
+# adj_precuneus_vol_long_rate_min2$adj_precuneus_vol_rate <- as.numeric(adj_precuneus_vol_long_rate_min2$adj_precuneus_vol_rate)
+# adj_precuneus_vol_long_rate_min2$imagid <- as.factor(adj_precuneus_vol_long_rate_min2$imagid)
+# adj_precuneus_vol_long_rate_min <- merge(adj_precuneus_vol_long_rate_min2, log_csf_long_rate_min, by = c( "imagid"))
+
+adj_precuneus_vol_long_rate_min$Group_no_12_conv_grp_sym <- as.factor(adj_precuneus_vol_long_rate_min$Group_no_12_conv_grp_sym)
+adj_precuneus_vol_long_rate_min$Group_no_12 <- as.factor(adj_precuneus_vol_long_rate_min$Group_no_12)
+
+
+print(precuneus_log_csf_long_rate_min_plot <-adj_precuneus_vol_long_rate_min %>%
+        ggplot( aes(x=log_csf_nfL_rate, y=adj_precuneus_vol_rate, group=Group_no_12_conv_grp_sym)) +
+        geom_smooth ( method = "lm", size = 3,se=TRUE, aes(fill=Group_no_12_conv_grp_sym, color=Group_no_12_conv_grp_sym, linetype =Group_no_12_conv_grp_sym ),show.legend=F)+ 
+        #labs(x="log CSF NfL rate of change", y="Hippocampal Volume rate of change", fill="Grouping", color= "Grouping")+
+        labs(x=bquote(bold(paste( Delta, ~log[10](CSF~NfL)))), y= bquote(bold(paste( Delta,~Precuneus~Volume))), color= "Grouping")+
+        #labs(x = bquote(bold(paste( Delta, ~log[10](CSF~NfL)))), y = bquote(bold(paste( Delta, ~Hippocampal Volume)))) +
+        scale_fill_manual(values = c( "grey33", "gold","darkred"), labels = c('Non-Carriers', 'PreSymptomatic Carriers', 'Symptomatic Carriers'))+
+        scale_color_manual(values = c( "grey33", "gold","darkred" ), labels = c('Non-Carriers', 'PreSymptomatic Carriers', 'Symptomatic Carriers'))+
+         scale_linetype_manual(values=c("dashed", "dashed", "solid"))+
+        scale_shape_manual(values = c( 15,16,17 ), labels = c('Non-Carriers', 'PreSymptomatic Carriers', 'Symptomatic Carriers'))+
+        geom_point(size=5,aes(fill=Group_no_12_conv_grp_sym, color=Group_no_12_conv_grp_sym, shape = Group_no_12_conv_grp_sym),show.legend=F, alpha=.5) +
+        theme_bw() +
+        theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size =35, face="bold")) + 
+        theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size =35, face="bold")) +
+        theme(legend.title = element_text(size=15, family="Helvetica", face="bold"))+  
+        theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent"))+  
+        theme(legend.text = element_text(size=15, family="Helvetica", face="bold"))+
+        theme(axis.text.y = element_text(size = 25, face="bold")) +
+        theme(axis.text.x = element_text(size = 25, face="bold")) +
+theme(legend.position = c(0.4,.2))+ 
+        theme(plot.margin = margin(2, 1, 1, 1, "cm")))
+
+```
+
+
+```{r Figure 4C}
+
+
+#### precuneus volume
+plasma_all  <- data %>% filter(PLASMA_NFL > -1 )
+plasma_all  <- plasma_all %>% filter(dian_mutpar_eyo > -100 )
+plasma_all_bmi <-filter(plasma_all, bmi >0)
+
+plasma_all_bmi$MR_PRECUNEUS_avg <- .5*(plasma_all_bmi$MR_LV_PRECUNEUS + plasma_all_bmi$MR_RV_PRECUNEUS)
+
+plasma_all_bmi$adj_precuneus_vol <- resid(lm(plasma_all_bmi$MR_PRECUNEUS_avg ~ plasma_all_bmi$MR_TOTV_INTRACRANIAL, na.action = na.exclude)) + mean(plasma_all_bmi$MR_PRECUNEUS_avg, na.rm = TRUE)
+plasma_all_bmi_pcv <-filter(plasma_all_bmi, adj_precuneus_vol > 0)
+plasma_all_bmi_pcv_long <-plasma_all_bmi_pcv %>% group_by(imagid) %>%
+  filter(n() > 1)
+
+
+plasma_all_bmi_pcv_long$log_plasma_NFL <- log10(plasma_all_bmi_pcv_long$PLASMA_NFL)
+
+earliest_age <- aggregate(visitage~imagid, plasma_all_bmi_pcv_long, min)
+colnames(earliest_age) <- c("imagid", "earliest_age")
+
+
+earliest_eyo <- aggregate(dian_mutpar_eyo~imagid, plasma_all_bmi_pcv_long, min)
+colnames(earliest_eyo) <- c("imagid", "earliest_eyo")
+
+earliest_bmi <- aggregate(bmi~imagid, plasma_all_bmi_pcv_long, min)
+colnames(earliest_bmi) <- c("imagid", "earliest_bmi")
+
+plasma_all_bmi_pcv_long <- merge(plasma_all_bmi_pcv_long, latest_eyo, by = "imagid")
+
+plasma_all_bmi_pcv_long <- merge(plasma_all_bmi_pcv_long, earliest_age, by = "imagid")
+plasma_all_bmi_pcv_long <- merge(plasma_all_bmi_pcv_long, earliest_eyo, by = "imagid")
+plasma_all_bmi_pcv_long <- merge(plasma_all_bmi_pcv_long, earliest_bmi, by = "imagid")
+
+
+Formatting_Scatter = 
+  # theme(axis.title = element_text(family = "Helvetica", color="#666666", face="bold", size=30)) + 
+  theme_bw() +
+  theme(axis.text = element_text(size = 10), axis.title.x=element_blank()) +
+  theme(legend.title=element_blank()) +
+  theme(legend.text=element_text(size=15, family="Helvetica")) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size = 15, face="bold")) + 
+  theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size = 15, face="bold")) +
+  theme(legend.position = "" )+
+  theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent")) 
+
+plasma_all_bmi_pcv_long$Mutation <- as.factor(plasma_all_bmi_pcv_long$Mutation)
+
+####spaghetti plot
+Point = geom_point(size=1.5,aes(color=Mutation, shape=Mutation),show.legend=F) 
+cPlot=ggplot(plasma_all_bmi_pcv_long, aes(x=dian_mutpar_eyo, y=log_plasma_NFL, group=imagid, col=Mutation))
+Shape_Labels= scale_shape_discrete(labels=c('NC', 'MC'),solid=TRUE) 
+cfill = scale_fill_manual(values=c( 'grey33', '#A50026'), labels=c( 'NC', 'MC'))
+Color=scale_color_manual(values=c( 'grey33', '#A50026'), labels=c( 'NC', 'MC')) 
+line= geom_line(data=plasma_all_bmi_pcv_long, size=1, linetype=1, aes(x=dian_mutpar_eyo, y=log_plasma_NFL, group=imagid ),show.legend=F) 
+Labels=labs(x = "EYO", y= "Log plasma NfL (pg/ml)") #, title="testing") #Add in X and Y axis labels
+cx= scale_x_continuous(breaks = c( 0), labels = c( "0"))
+spaghetti_plasma_nfl2=cPlot + line+ Point +  Labels + Formatting_Scatter + cfill + Color + Shape_Labels+cx
+print(spaghetti_plasma_nfl2)
+
+#create a time variable where zero equals baseline
+plasma_all_bmi_pcv_long$time_wrt_base <- plasma_all_bmi_pcv_long$dian_mutpar_eyo - plasma_all_bmi_pcv_long$earliest_eyo 
+
+log_plasma_nflslope <-(lmer(log_plasma_NFL  ~ 1 + time_wrt_base + (time_wrt_base|imagid), plasma_all_bmi_pcv_long))
+
+beta <- coef(log_plasma_nflslope)$imagid
+extracted1 <- tibble::rownames_to_column(beta, "imagid") # Apply rownames_to_column
+extracted1
+log_plasma_long_rate<- merge(extracted1, plasma_all_bmi_pcv_long, by = "imagid")
+log_plasma_long_rate$log_plasma_nfL_rate <-log_plasma_long_rate$time_wrt_base.x
+
+summary(log_plasma_long_rate$log_plasma_nfL_rate)
+earliest_bmi
+
+summary(lmer(adj_precuneus_vol~log_plasma_nfL_rate*time_wrt_base.y  + earliest_bmi*time_wrt_base.y + earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_plasma_long_rate))
+
+log_plasma_long_rate$Group_no_12 <- as.factor(log_plasma_long_rate$Group_no_12)
+
+log_plasma_long_rate_nc <- log_plasma_long_rate %>% filter(Group_no_12 == "-1")
+summary(lmer(adj_precuneus_vol~log_plasma_nfL_rate*time_wrt_base.y  + earliest_bmi*time_wrt_base.y+ earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_plasma_long_rate_nc))
+
+log_plasma_long_rate_amc <- log_plasma_long_rate %>% filter(Group_no_12 == "0")
+summary(lmer(adj_precuneus_vol~log_plasma_nfL_rate*time_wrt_base.y  + earliest_bmi*time_wrt_base.y+ earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_plasma_long_rate_amc))
+
+log_plasma_long_rate_smc <- log_plasma_long_rate %>% filter(Group_no_12 == "2")
+summary(lmer(adj_precuneus_vol~log_plasma_nfL_rate*time_wrt_base.y + earliest_bmi*time_wrt_base.y + earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_plasma_long_rate_smc))
+
+
+log_plasma_long_rate$Group_no_12_conv_grp_sym <- factor(log_plasma_long_rate$Group_no_12_conv_grp_sym, labels = c("NC", "aMC", "sMC"))
+
+log_plasma_long_rate_nc <- log_plasma_long_rate %>% filter(Group_no_12_conv_grp_sym == "NC")
+summary(lmer(adj_precuneus_vol~log_plasma_nfL_rate*time_wrt_base.y + earliest_bmi*time_wrt_base.y + earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_plasma_long_rate_nc))
+
+log_plasma_long_rate_amc <- log_plasma_long_rate %>% filter(Group_no_12_conv_grp_sym == "aMC")
+summary(lmer(adj_precuneus_vol~log_plasma_nfL_rate*time_wrt_base.y + earliest_bmi*time_wrt_base.y + earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_plasma_long_rate_amc))
+
+log_plasma_long_rate_smc <- log_plasma_long_rate %>% filter(Group_no_12_conv_grp_sym == "sMC")
+summary(lmer(adj_precuneus_vol~log_plasma_nfL_rate*time_wrt_base.y+ earliest_bmi*time_wrt_base.y  + earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_plasma_long_rate_smc))
+
+
+
+log_plasma_long_rate_mc <- log_plasma_long_rate %>% filter(Mutation == "1")
+summary(lmer(adj_precuneus_vol~log_plasma_nfL_rate*time_wrt_base.y+ earliest_bmi*time_wrt_base.y  + earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_plasma_long_rate_mc))
+
+
+baseline <- aggregate(visit~imagid, log_plasma_long_rate, FUN = "min")
+log_plasma_long_rate_min <- merge(log_plasma_long_rate, baseline, by = c( "visit", "imagid"))
+rm(baseline)
+
+
+log_plasma_long_rate_min$log_plasma_nfL_rate <- as.numeric(log_plasma_long_rate_min$log_plasma_nfL_rate)
+
+
+adj_precuneus_vol_slope <-(lmer(adj_precuneus_vol  ~ 1 + time_wrt_base + (time_wrt_base|imagid), plasma_all_bmi_pcv_long))
+
+beta <- coef(adj_precuneus_vol_slope)$imagid
+extracted1 <- tibble::rownames_to_column(beta, "imagid") # Apply rownames_to_column
+
+adj_precuneus_vol_long_rate<- merge(extracted1, plasma_all_bmi_pcv_long, by = "imagid")
+adj_precuneus_vol_long_rate$adj_precuneus_vol_rate <-adj_precuneus_vol_long_rate$time_wrt_base.x
+summary(adj_precuneus_vol_long_rate$adj_precuneus_vol_rate)
+
+baseline <- aggregate(visit~imagid, adj_precuneus_vol_long_rate, FUN = "min")
+adj_precuneus_vol_long <- merge(adj_precuneus_vol_long_rate, baseline, by = c( "visit", "imagid"))
+rm(baseline)
+#plasma_long_rate_min_outlier  <- log_plasma_long_rate_min %>% filter(plasma_nfL_rate > -1 )
+
+adj_precuneus_vol_long_rate_min2 <- as.data.frame(cbind(adj_precuneus_vol_long$adj_precuneus_vol_rate, adj_precuneus_vol_long$imagid))
+colnames(adj_precuneus_vol_long_rate_min2) <- c("adj_precuneus_vol_rate", "imagid")
+adj_precuneus_vol_long_rate_min2$adj_precuneus_vol_rate <- as.numeric(adj_precuneus_vol_long_rate_min2$adj_precuneus_vol_rate)
+adj_precuneus_vol_long_rate_min2$imagid <- as.factor(adj_precuneus_vol_long_rate_min2$imagid)
+adj_precuneus_vol_long_rate_min <- merge(adj_precuneus_vol_long_rate_min2, log_plasma_long_rate_min, by = c( "imagid"))
+
+adj_precuneus_vol_long_rate_min$log_plasma_nfL_rate
+
+adj_precuneus_vol_long_rate_min$Group_no_12_conv_grp_sym <- as.factor(adj_precuneus_vol_long_rate_min$Group_no_12_conv_grp_sym)
+adj_precuneus_vol_long_rate_min$Group_no_12 <- as.factor(adj_precuneus_vol_long_rate_min$Group_no_12)
+
+adj_precuneus_vol_long_rate_min$log_plasma_nfL_rate
+print(precuneus_log_plasma_long_rate_min_plot <-adj_precuneus_vol_long_rate_min %>%
+        ggplot( aes(x=log_plasma_nfL_rate, y=adj_precuneus_vol_rate, group=Group_no_12_conv_grp_sym)) +
+        geom_smooth ( method = "lm", size = 3,se=TRUE, aes(fill=Group_no_12_conv_grp_sym, color=Group_no_12_conv_grp_sym, linetype = Group_no_12_conv_grp_sym),show.legend=F)+ 
+        #labs(x="log plasma NfL rate of change", y="Hippocampal Volume rate of change", fill="Grouping", color= "Grouping")+
+        labs(x=bquote(bold(paste( Delta, ~log[10](Plasma~NfL)))), y= bquote(bold(paste( Delta,~Precuneus~Volume))), color= "Grouping")+
+        #labs(x = bquote(bold(paste( Delta, ~log[10](plasma~NfL)))), y = bquote(bold(paste( Delta, ~Hippocampal Volume)))) +
+        scale_fill_manual(values = c( "grey33", "gold","darkred"), labels = c('Non-Carriers', 'PreSymptomatic Carriers', 'Symptomatic Carriers'))+
+        scale_color_manual(values = c( "grey33", "gold","darkred" ), labels = c('Non-Carriers', 'PreSymptomatic Carriers', 'Symptomatic Carriers'))+
+          scale_shape_manual(values = c( 15,16,17 ), labels = c('Non-Carriers', 'PreSymptomatic Carriers', 'Symptomatic Carriers'))+
+                 scale_linetype_manual(values=c("dashed", "dashed", "solid"))+
+        geom_point(size=5,aes(fill=Group_no_12_conv_grp_sym, color=Group_no_12_conv_grp_sym, shape=Group_no_12_conv_grp_sym),show.legend=F, alpha =0.5) +
+        theme_bw() +
+        theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size =35, face="bold")) + 
+        theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size =35, face="bold")) +
+        theme(legend.title = element_text(size=15, family="Helvetica", face="bold"))+  
+        theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent"))+  
+        theme(legend.text = element_text(size=15, family="Helvetica", face="bold"))+
+        theme(axis.text.y = element_text(size = 25, face="bold")) +
+        theme(axis.text.x = element_text(size = 25, face="bold")) +
+theme(legend.position = c(0.4,.2))+ 
+        theme(plot.margin = margin(2, 1, 1, 1, "cm")))
+
+
+adj_precuneus_vol_long_rate_min$Group_no_12_conv_grp_sym <- factor(adj_precuneus_vol_long_rate_min$Group_no_12_conv_grp_sym, labels = c("NC", "aMC", "sMC"))
+
+adj_precuneus_vol_long_rate_min_nc_plasma <- adj_precuneus_vol_long_rate_min %>% filter(Group_no_12_conv_grp_sym == "NC")
+summary(lm(adj_precuneus_vol_rate~bmi+visitage+gender+log_plasma_nfL_rate ,adj_precuneus_vol_long_rate_min_nc_plasma))
+
+adj_precuneus_vol_long_rate_min_amc_plasma <- adj_precuneus_vol_long_rate_min %>% filter(Group_no_12_conv_grp_sym == "aMC")
+summary(lm(adj_precuneus_vol_rate~bmi+visitage+gender+log_plasma_nfL_rate ,adj_precuneus_vol_long_rate_min_amc_plasma))
+
+adj_precuneus_vol_long_rate_min_smc_plasma <- adj_precuneus_vol_long_rate_min %>% filter(Group_no_12_conv_grp_sym == "sMC")
+summary(lm(adj_precuneus_vol_rate~bmi+visitage+gender+log_plasma_nfL_rate ,adj_precuneus_vol_long_rate_min_smc_plasma))
+
+
+
+```
+
+```{r Figure 4D}
+
+CSF_all_bmi <-filter(CSF_all, bmi >0)
+CSF_all_bmi_pib <-filter(CSF_all_bmi, PIB_fSUVR_rsf_TOT_CTX_PRECUNEUS > 0)
+CSF_all_bmi_pib_long <-CSF_all_bmi_pib %>% group_by(imagid) %>%
+  filter(n() > 1)
+CSF_all_bmi_pib_long$log_CSF_NFL <- log10(CSF_all_bmi_pib_long$CSF_NFL)
+earliest_age <- aggregate(visitage~imagid, CSF_all_bmi_pib_long, min)
+colnames(earliest_age) <- c("imagid", "earliest_age")
+earliest_eyo <- aggregate(dian_mutpar_eyo~imagid, CSF_all_bmi_pib_long, min)
+colnames(earliest_eyo) <- c("imagid", "earliest_eyo")
+latest_eyo <- aggregate(dian_mutpar_eyo~imagid, CSF_all_bmi_pib_long, min)
+colnames(latest_eyo) <- c("imagid", "latest_eyo")
+CSF_all_bmi_pib_long <- merge(CSF_all_bmi_pib_long, latest_eyo, by = "imagid")
+CSF_all_bmi_pib_long <- merge(CSF_all_bmi_pib_long, earliest_age, by = "imagid")
+CSF_all_bmi_pib_long <- merge(CSF_all_bmi_pib_long, earliest_eyo, by = "imagid")
+CSF_all_bmi_pib_long$Group_no_12_conv_grp_sym <- factor(CSF_all_bmi_pib_long$Group_no_12_conv_grp_sym, labels = c("NC", "aMC", "sMC"))
+
+#create a time variable where zero equals baseline
+CSF_all_bmi_pib_long$time_wrt_base <- CSF_all_bmi_pib_long$dian_mutpar_eyo - CSF_all_bmi_pib_long$earliest_eyo 
+log_csf_nflslope <-(lmer(log_CSF_NFL  ~ 1 + time_wrt_base + (time_wrt_base|imagid), CSF_all_bmi_pib_long))
+beta <- coef(log_csf_nflslope)$imagid
+extracted1 <- tibble::rownames_to_column(beta, "imagid") # Apply rownames_to_column
+extracted1
+log_csf_long_rate<- merge(extracted1, CSF_all_bmi_pib_long, by = "imagid")
+log_csf_long_rate$log_csf_nfL_rate <-log_csf_long_rate$time_wrt_base.x
+summary(log_csf_long_rate$log_csf_nfL_rate)
+
+log_csf_long_rate$Group_no_12 <- as.factor(log_csf_long_rate$Group_no_12)
+
+log_csf_long_rate$Group_no_12_conv_grp_sym <- factor(log_csf_long_rate$Group_no_12_conv_grp_sym, labels = c("NC", "aMC", "sMC"))
+
+log_csf_long_rate_nc <- log_csf_long_rate %>% filter(Group_no_12_conv_grp_sym == "NC")
+summary(lmer(PIB_fSUVR_rsf_TOT_CTX_PRECUNEUS~log_csf_nfL_rate*time_wrt_base.y  + earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_csf_long_rate_nc))
+
+log_csf_long_rate_amc <- log_csf_long_rate %>% filter(Group_no_12_conv_grp_sym == "aMC")
+summary(lmer(PIB_fSUVR_rsf_TOT_CTX_PRECUNEUS~log_csf_nfL_rate*time_wrt_base.y  + earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_csf_long_rate_amc))
+
+log_csf_long_rate_smc <- log_csf_long_rate %>% filter(Group_no_12_conv_grp_sym == "sMC")
+summary(lmer(PIB_fSUVR_rsf_TOT_CTX_PRECUNEUS~log_csf_nfL_rate*time_wrt_base.y  + earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_csf_long_rate_smc))
+
+log_csf_long_rate$Mutation
+log_csf_long_rate_mc <- log_csf_long_rate %>% filter(Mutation == "1")
+summary(lmer(PIB_fSUVR_rsf_TOT_CTX_PRECUNEUS~log_csf_nfL_rate*time_wrt_base.y  + earliest_age*time_wrt_base.y + gender*time_wrt_base.y+ (time_wrt_base.y|imagid), log_csf_long_rate_mc))
+
+baseline <- aggregate(visit~imagid, log_csf_long_rate, FUN = "min")
+log_plasma_long_rate_min <- merge(log_plasma_long_rate, baseline, by = c( "visit", "imagid"))
+rm(baseline)
+
+
+
+log_csf_long_rate_min$log_csf_nfL_rate <- as.numeric(log_csf_long_rate_min$log_csf_nfL_rate)
+
+
+
+pib_precuneus_slope <-(lmer( PIB_fSUVR_rsf_TOT_CTX_PRECUNEUS ~ 1 + time_wrt_base + (time_wrt_base|imagid), CSF_all_bmi_pib_long))
+
+beta <- coef(pib_precuneus_slope)$imagid
+extracted1 <- tibble::rownames_to_column(beta, "imagid") # Apply rownames_to_column
+extracted1
+pib_precuneus_slope_long_rate<- merge(extracted1, CSF_all_bmi_pib_long, by = "imagid")
+pib_precuneus_slope_long_rate$pib_rate <-pib_precuneus_slope_long_rate$time_wrt_base.x
+summary(pib_precuneus_slope_long_rate$pib_rate)
+
+baseline <- aggregate(visit~imagid, pib_precuneus_slope_long_rate, FUN = "min")
+pib_precuneus_slope_long_rate_min <- merge(pib_precuneus_slope_long_rate, baseline, by = c( "visit", "imagid"))
+rm(baseline)
+#plasma_long_rate_min_outlier  <- log_plasma_long_rate_min %>% filter(plasma_nfL_rate > -1 )
+
+pib_precuneus_slope_long_rate_min2 <- as.data.frame(cbind(pib_precuneus_slope_long_rate_min$pib_rate, pib_precuneus_slope_long_rate_min$imagid))
+colnames(pib_precuneus_slope_long_rate_min2) <- c("pib_rate", "imagid")
+pib_precuneus_slope_long_rate_min2$pib_rate <- as.numeric(pib_precuneus_slope_long_rate_min2$pib_rate)
+pib_precuneus_slope_long_rate_min2$imagid <- as.factor(pib_precuneus_slope_long_rate_min2$imagid)
+pib_log_csf_long_rate_min <- merge(pib_precuneus_slope_long_rate_min2, log_csf_long_rate_min, by = c( "imagid"))
+pib_log_csf_long_rate_min$pib_rate
+
+
+
+pib_log_csf_long_rate_min$Group_no_12_conv_grp_sym <- as.factor(pib_log_csf_long_rate_min$Group_no_12_conv_grp_sym)
+pib_log_csf_long_rate_min$Group_no_12 <- as.factor(pib_log_csf_long_rate_min$Group_no_12)
+
+
+print(pib_log_csf_long_rate_min_plot <-pib_log_csf_long_rate_min %>%
+        ggplot( aes(x=log_csf_nfL_rate, y=pib_rate, group=Group_no_12_conv_grp_sym)) +
+        geom_smooth ( method = "lm", size = 3,se=TRUE, aes(fill=Group_no_12_conv_grp_sym, color=Group_no_12_conv_grp_sym, linetype=Group_no_12_conv_grp_sym),show.legend=F)+ 
+       # labs(x="log CSF NfL rate of change", y="Amyloid-PET rate of change", fill="Grouping", color= "Grouping")+
+        labs(x = bquote(bold(paste( Delta, ~log[10](CSF~NfL)))), y = bquote(bold(paste( Delta, ~Amyloid-PET))))+ #, title="testing") #Add in X and Y axis labels
+        scale_fill_manual(values = c( "grey33", "gold","darkred"), labels = c('Non-Carriers', 'PreSymptomatic Carriers', 'Symptomatic Carriers'))+
+        scale_color_manual(values = c( "grey33", "gold","darkred" ), labels = c('Non-Carriers', 'PreSymptomatic Carriers', 'Symptomatic Carriers'))+
+                scale_shape_manual(values = c( 15,16,17), labels = c('Non-Carriers', 'PreSymptomatic Carriers', 'Symptomatic Carriers'))+
+         scale_linetype_manual(values=c("dashed", "dashed", "dashed"))+
+
+        geom_point(size=5,aes(fill=Group_no_12_conv_grp_sym, color=Group_no_12_conv_grp_sym, shape=Group_no_12_conv_grp_sym),show.legend=F, alpha =.5) +
+        theme_bw() +
+       theme(axis.title.y = element_text(margin = margin(t = 0, r = 10, b = 0, l = 0), size =35, face="bold")) + 
+        theme(axis.title.x = element_text(margin = margin(t = 10, r = 0, b = 0, l = 0), size =35, face="bold")) +
+        theme(legend.title = element_text(size=15, family="Helvetica", face="bold"))+  
+        theme(legend.background = element_rect(fill="transparent"), legend.key = element_rect(fill = "transparent"))+  
+        theme(legend.text = element_text(size=15, family="Helvetica", face="bold"))+
+        theme(axis.text.y = element_text(size = 25, face="bold")) +
+        theme(axis.text.x = element_text(size = 25, face="bold")) +
+theme(legend.position = c(0.4,.2))+ 
+        theme(plot.margin = margin(2, 1, 1, 1, "cm")))
+
+```
+
+```{r plotting figure 4}
+
+Fig_rate_v_biomarker_rate<-plot_grid(precuneus_log_plasma_long_rate_min_plot, precuneus_log_csf_long_rate_min_plot,pib_log_plasma_long_rate_min_plot,pib_log_csf_long_rate_min_plot,nrow = 2, hjust=0, labels = "AUTO", label_size = 35)
+
+
+dev.new()
+pdf("/Users/sws59/Dropbox (Partners HealthCare)/DIAN_Mathias_collab/NfL_paper/NC_submission/Rev_2/Figures_tables/Figure_4_s.pdf", width=16, height=16)
+Fig_rate_v_biomarker_rate
+dev.off()
+
+```
+
+
